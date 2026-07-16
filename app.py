@@ -1,15 +1,18 @@
 # ============================================================================
-# 🏥 HEALTH PLATFORM 360° PRO — ФИНАЛЬНАЯ ВЕРСИЯ
-# С мотивацией, напоминаниями, замерами тела и Excel-экспортом
+# 🏥 HEALTH PLATFORM 360° PRO — ФИНАЛЬНАЯ ВЕРСИЯ v7
+# Оптимизированная + Безопасная + Сброс пароля
 # ============================================================================
 
 import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
+import secrets
+import re
 import random
 from datetime import datetime, timedelta, date
 from io import BytesIO
+from functools import lru_cache
 
 # ============================================================================
 # НАСТРОЙКА СТРАНИЦЫ + PWA
@@ -25,10 +28,94 @@ st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#2c5f8d">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Health 360">
 <link rel="manifest" href="manifest.json">
 """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# 🔐 БЕЗОПАСНОСТЬ: Хеширование паролей с солью
+# ============================================================================
+def hash_password(password: str, salt: str = None) -> tuple[str, str]:
+    """Безопасное хеширование с солью (SHA-256 + salt)"""
+    if salt is None:
+        salt = secrets.token_hex(16)  # 32 символа случайной соли
+    # Комбинируем соль + пароль + pepper (секретный ключ приложения)
+    pepper = "health_platform_2026_secret_key"
+    combined = f"{salt}{password}{pepper}"
+    hash_value = hashlib.sha256(combined.encode()).hexdigest()
+    return hash_value, salt
+
+
+def verify_password(password: str, stored_hash: str, stored_salt: str) -> bool:
+    """Проверка пароля"""
+    computed_hash, _ = hash_password(password, stored_salt)
+    # Используем constant-time сравнение для защиты от timing attacks
+    return secrets.compare_digest(computed_hash, stored_hash)
+
+
+def validate_email(email: str) -> bool:
+    """Валидация email формата"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    """Проверка сложности пароля"""
+    if len(password) < 8:
+        return False, "Минимум 8 символов"
+    if not re.search(r'[A-Za-z]', password):
+        return False, "Должны быть буквы"
+    if not re.search(r'\d', password):
+        return False, "Должна быть хотя бы одна цифра"
+    return True, "Пароль надёжный"
+
+
+def sanitize_input(text: str, max_length: int = 100) -> str:
+    """Очистка ввода от потенциально опасных символов"""
+    if not text:
+        return ""
+    # Удаляем все кроме букв, цифр, пробелов и базовой пунктуации
+    cleaned = re.sub(r'[^\w\s\-.@]', '', text)
+    return cleaned[:max_length].strip()
+
+
+# ============================================================================
+# 🛡️ ЗАЩИТА ОТ БРУТФОРСА
+# ============================================================================
+def check_login_attempts(email: str) -> tuple[bool, int]:
+    """Проверка блокировки после неудачных попыток"""
+    if 'login_attempts' not in st.session_state:
+        st.session_state.login_attempts = {}
+
+    attempts = st.session_state.login_attempts.get(email, {'count': 0, 'last_attempt': None})
+
+    if attempts['last_attempt']:
+        time_diff = (datetime.now() - attempts['last_attempt']).total_seconds()
+        if attempts['count'] >= 5 and time_diff < 900:  # 15 минут
+            remaining = int(900 - time_diff)
+            return False, remaining
+
+    return True, 0
+
+
+def record_failed_attempt(email: str):
+    """Запись неудачной попытки входа"""
+    if 'login_attempts' not in st.session_state:
+        st.session_state.login_attempts = {}
+
+    if email not in st.session_state.login_attempts:
+        st.session_state.login_attempts[email] = {'count': 0, 'last_attempt': None}
+
+    st.session_state.login_attempts[email]['count'] += 1
+    st.session_state.login_attempts[email]['last_attempt'] = datetime.now()
+
+
+def reset_login_attempts(email: str):
+    """Сброс счётчика после успешного входа"""
+    if 'login_attempts' in st.session_state and email in st.session_state.login_attempts:
+        del st.session_state.login_attempts[email]
+
 
 # ============================================================================
 # ФОНОВЫЕ ИЗОБРАЖЕНИЯ
@@ -42,10 +129,12 @@ BACKGROUNDS = {
 }
 
 
-def set_background(bg_name):
+@st.cache_data
+def get_background_css(bg_name: str) -> str:
+    """Кэширование CSS для фона"""
     url = BACKGROUNDS.get(bg_name)
     if url:
-        st.markdown(f"""
+        return f"""
         <style>
         .stApp {{
             background: linear-gradient(rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.88)), 
@@ -55,27 +144,43 @@ def set_background(bg_name):
             background-attachment: fixed;
         }}
         </style>
-        """, unsafe_allow_html=True)
+        """
     else:
-        st.markdown("""
+        return """
         <style>
         .stApp { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
         </style>
-        """, unsafe_allow_html=True)
+        """
+
+
+def set_background(bg_name: str):
+    st.markdown(get_background_css(bg_name), unsafe_allow_html=True)
 
 
 # ============================================================================
-# БАЗА ДАННЫХ (v6 — финальная структура)
+# БАЗА ДАННЫХ (v7 — с солью для паролей + секретный вопрос)
 # ============================================================================
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('health_platform_v6.db', check_same_thread=False)
+    conn = sqlite3.connect('health_platform_v7.db', check_same_thread=False)
     c = conn.cursor()
 
+    # Таблица пользователей (с salt и secret_question)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-        email TEXT PRIMARY KEY, surname TEXT, name TEXT, birth_date TEXT,
-        gender TEXT, password_hash TEXT, created_at TEXT,
-        background TEXT DEFAULT '🌌 Градиент (по умолчанию)'
+        email TEXT PRIMARY KEY, 
+        surname TEXT, 
+        name TEXT, 
+        birth_date TEXT,
+        gender TEXT, 
+        password_hash TEXT, 
+        password_salt TEXT,
+        secret_question TEXT,
+        secret_answer_hash TEXT,
+        secret_answer_salt TEXT,
+        created_at TEXT,
+        background TEXT DEFAULT '🌌 Градиент (по умолчанию)',
+        failed_attempts INTEGER DEFAULT 0,
+        locked_until TEXT
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS measurements (
@@ -109,6 +214,13 @@ def init_db():
         hours REAL, quality TEXT, notes TEXT
     )''')
 
+    # Индексы для ускорения запросов
+    c.execute('CREATE INDEX IF NOT EXISTS idx_measurements_email ON measurements(email)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_body_measurements_email ON body_measurements(email)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_workouts_email ON workouts(email)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_water_email ON water(email)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sleep_email ON sleep(email)')
+
     conn.commit()
     return conn
 
@@ -117,37 +229,121 @@ conn = init_db()
 
 
 # ============================================================================
-# ФУНКЦИИ АВТОРИЗАЦИИ
+# ФУНКЦИИ АВТОРИЗАЦИИ (с защитой)
 # ============================================================================
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+def register_user(email: str, surname: str, name: str, birth_date: str,
+                  gender: str, password: str, secret_question: str, secret_answer: str) -> tuple[bool, str]:
+    """Регистрация с валидацией"""
+    # Валидация
+    if not validate_email(email):
+        return False, "Неверный формат email"
 
+    is_strong, msg = validate_password_strength(password)
+    if not is_strong:
+        return False, msg
 
-def register_user(email, surname, name, birth_date, gender, password):
+    # Хеширование
+    pwd_hash, pwd_salt = hash_password(password)
+    ans_hash, ans_salt = hash_password(secret_answer.lower().strip())
+
     cursor = conn.cursor()
     try:
         cursor.execute('''INSERT INTO users 
-            (email, surname, name, birth_date, gender, password_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                       (email, surname, name, birth_date, gender,
-                        hash_password(password), datetime.now().strftime("%d.%m.%Y %H:%M")))
+            (email, surname, name, birth_date, gender, password_hash, password_salt,
+             secret_question, secret_answer_hash, secret_answer_salt, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                       (sanitize_input(email, 100),
+                        sanitize_input(surname, 50),
+                        sanitize_input(name, 50),
+                        birth_date,
+                        gender,
+                        pwd_hash,
+                        pwd_salt,
+                        sanitize_input(secret_question, 200),
+                        ans_hash,
+                        ans_salt,
+                        datetime.now().strftime("%d.%m.%Y %H:%M")))
         conn.commit()
-        return True
+        return True, "Регистрация успешна"
     except sqlite3.IntegrityError:
-        return False
+        return False, "Пользователь с таким email уже существует"
 
 
-def login_user(email, password):
+def login_user(email: str, password: str) -> tuple[bool, str, any]:
+    """Вход с защитой от брутфорса"""
+    # Проверка блокировки
+    is_allowed, remaining = check_login_attempts(email)
+    if not is_allowed:
+        return False, f"⚠️ Аккаунт заблокирован. Подождите {remaining // 60} минут.", None
+
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE email=? AND password_hash=?',
-                   (email, hash_password(password)))
-    return cursor.fetchone()
+    cursor.execute('''SELECT email, surname, name, birth_date, gender, 
+                      password_hash, password_salt, background 
+                      FROM users WHERE email=?''', (email,))
+    user = cursor.fetchone()
+
+    if not user:
+        record_failed_attempt(email)
+        return False, "❌ Неверный email или пароль", None
+
+    # Проверка пароля
+    if not verify_password(password, user[5], user[6]):
+        record_failed_attempt(email)
+        attempts = st.session_state.login_attempts.get(email, {}).get('count', 0)
+        remaining_attempts = max(0, 5 - attempts)
+        return False, f"❌ Неверный пароль. Осталось попыток: {remaining_attempts}", None
+
+    # Успешный вход
+    reset_login_attempts(email)
+    user_data = {
+        'surname': user[1],
+        'name': user[2],
+        'birth_date': user[3],
+        'gender': user[4],
+        'background': user[7] or '🌌 Градиент (по умолчанию)'
+    }
+    return True, "Вход выполнен", user_data
+
+
+def reset_password(email: str, secret_answer: str, new_password: str) -> tuple[bool, str]:
+    """Сброс пароля через секретный вопрос"""
+    # Валидация нового пароля
+    is_strong, msg = validate_password_strength(new_password)
+    if not is_strong:
+        return False, msg
+
+    cursor = conn.cursor()
+    cursor.execute('''SELECT secret_answer_hash, secret_answer_salt FROM users WHERE email=?''', (email,))
+    result = cursor.fetchone()
+
+    if not result:
+        return False, "Пользователь не найден"
+
+    # Проверка ответа на секретный вопрос
+    if not verify_password(secret_answer.lower().strip(), result[0], result[1]):
+        return False, "Неверный ответ на секретный вопрос"
+
+    # Обновление пароля
+    new_hash, new_salt = hash_password(new_password)
+    cursor.execute('''UPDATE users SET password_hash=?, password_salt=? WHERE email=?''',
+                   (new_hash, new_salt, email))
+    conn.commit()
+    return True, "Пароль успешно изменён"
+
+
+def get_secret_question(email: str) -> str:
+    """Получить секретный вопрос для сброса пароля"""
+    cursor = conn.cursor()
+    cursor.execute('SELECT secret_question FROM users WHERE email=?', (email,))
+    result = cursor.fetchone()
+    return result[0] if result else ""
 
 
 # ============================================================================
-# МЕДИЦИНСКИЕ ФУНКЦИИ
+# 🎯 ОПТИМИЗИРОВАННЫЕ МЕДИЦИНСКИЕ ФУНКЦИИ (с кэшированием)
 # ============================================================================
-def calculate_whr(waist, hips, gender):
+@st.cache_data
+def calculate_whr(waist: float, hips: float, gender: str) -> tuple[float, str]:
     if not hips or hips == 0:
         return None, None
     whr = round(waist / hips, 2)
@@ -168,7 +364,8 @@ def calculate_whr(waist, hips, gender):
     return whr, cat
 
 
-def calculate_waist_risk(waist, gender):
+@st.cache_data
+def calculate_waist_risk(waist: float, gender: str) -> str:
     if not waist:
         return None
     if gender == 'ж':
@@ -181,7 +378,8 @@ def calculate_waist_risk(waist, gender):
         return "Высокий риск 🔴"
 
 
-def calculate_body_fat_navy(waist, hips, neck, height_cm, gender):
+@st.cache_data
+def calculate_body_fat_navy(waist: float, hips: float, neck: float, height_cm: float, gender: str) -> tuple[float, str]:
     if gender == 'м':
         if not all([waist, neck, height_cm]):
             return None, None
@@ -222,57 +420,50 @@ def calculate_body_fat_navy(waist, hips, neck, height_cm, gender):
 MOTIVATION_QUOTES = {
     'first_visit': [
         "🌟 Первый шаг — самый важный. Ты уже молодец, что начала!",
-        "🚀 Путь в 1000 км начинается с одного шага. Ты его сделала!",
-        "💎 Забота о себе — лучшая инвестиция. Добро пожаловать!",
+        "🚀 Путь в 1000 км начинается с одного шага!",
+        "💎 Забота о себе — лучшая инвестиция!",
         "🌱 Каждое большое изменение начинается с маленького решения.",
     ],
     'progress': [
-        "💪 Видишь результат? Твоё тело говорит тебе 'спасибо'!",
-        "🏆 Прогресс есть! Продолжай в том же духе!",
-        "✨ Ты становишься лучшей версией себя каждый день!",
-        "🔥 Дисциплина — это мост между целями и достижениями!",
-        "🎯 Маленькие шаги каждый день = большие результаты!",
+        "💪 Видишь результат? Твоё тело говорит 'спасибо'!",
+        "🏆 Прогресс есть! Продолжай!",
+        "✨ Ты становишься лучшей версией себя!",
+        "🔥 Дисциплина — мост между целями и достижениями!",
     ],
     'plateau': [
-        "🌊 Плато — это не остановка, а подготовка к новому рывку!",
+        "🌊 Плато — подготовка к новому рывку!",
         "💎 Тело перестраивается. Доверяй процессу!",
-        "🏔️ Самые красивые виды открываются после самого трудного подъёма!",
-        "🌱 Иногда кажется, что стоишь на месте, а корни растут вниз.",
+        "🏔️ Самые красивые виды после трудного подъёма!",
         "🧘 Терпение — ключ к долгосрочным результатам!",
     ],
     'goal_achieved': [
-        "🎉 ЦЕЛЬ ДОСТИГНУТА! Ты — настоящая героиня!",
-        "🏆 Ты доказала себе, что можешь всё! Горжусь тобой!",
+        "🎉 ЦЕЛЬ ДОСТИГНУТА! Ты — героиня!",
+        "🏆 Ты доказала, что можешь всё!",
         "👑 Это твоя победа! Запомни это чувство!",
-        "🌟 Ты вдохновляешь! Поделись своим успехом с миром!",
     ],
     'daily_random': [
-        "💧 Не забудь про воду сегодня!",
-        "🥗 Добавь овощей в следующий приём пищи!",
-        "🚶 10 000 шагов — твоя цель на сегодня!",
-        "😴 Хороший сон = хороший результат. Ложись пораньше!",
-        "🧘 5 минут растяжки изменят твой день!",
-        "🍎 Фрукт вместо десерта — маленькая победа!",
-        "💪 Каждая тренировка делает тебя сильнее!",
-        "🌞 Утро начинается с стакана воды!",
-        "📏 Замеры важнее веса. Измерь окружности!",
-        "🥑 Полезные жиры — твои друзья!",
-    ],
-    'reminder': [
-        "⏰ Пора взвеситься! Данные помогают отслеживать прогресс.",
-        "📏 Неделя прошла — время для новых замеров!",
-        "🎯 Регулярность — секрет успеха. Внеси данные!",
-        "💡 Маленький шаг сегодня = большой результат завтра!",
+        "💧 Не забудь про воду!",
+        "🥗 Добавь овощей в рацион!",
+        "🚶 10 000 шагов — цель на сегодня!",
+        "😴 Хороший сон = хороший результат!",
+        "🧘 5 минут растяжки изменят день!",
+        "💪 Каждая тренировка делает сильнее!",
     ]
 }
 
 
-def get_motivation_quote(category='daily_random'):
+@st.cache_data(ttl=3600)  # Кэш на 1 час
+def get_motivation_quote(category: str = 'daily_random') -> str:
     quotes = MOTIVATION_QUOTES.get(category, MOTIVATION_QUOTES['daily_random'])
     return random.choice(quotes)
 
 
-def check_reminder_needed(email):
+# ============================================================================
+# 🔔 ОПТИМИЗИРОВАННЫЕ ПРОВЕРКИ (с кэшированием)
+# ============================================================================
+@st.cache_data(ttl=60)  # Кэш на 1 минуту
+def check_reminder_needed(email: str) -> tuple[bool, int]:
+    """Проверка напоминания (кэшируется на 1 минуту)"""
     cursor = conn.cursor()
     cursor.execute('''SELECT MAX(date) FROM measurements WHERE email=?''', (email,))
     last_weight = cursor.fetchone()[0]
@@ -280,16 +471,18 @@ def check_reminder_needed(email):
     last_body = cursor.fetchone()[0]
     dates = [d for d in [last_weight, last_body] if d]
     if not dates:
-        return False, None
+        return False, 0
     try:
         last_date = max(datetime.strptime(d, "%d.%m.%Y %H:%M") for d in dates)
         days_passed = (datetime.now() - last_date).days
         return days_passed >= 7, days_passed
     except:
-        return False, None
+        return False, 0
 
 
-def check_progress(email):
+@st.cache_data(ttl=60)
+def check_progress(email: str) -> str:
+    """Определение статуса (кэшируется)"""
     cursor = conn.cursor()
     cursor.execute('''SELECT weight FROM measurements WHERE email=? 
                       ORDER BY date DESC LIMIT 10''', (email,))
@@ -302,15 +495,13 @@ def check_progress(email):
     cursor.execute('''SELECT target_weight FROM measurements WHERE email=? 
                       ORDER BY date DESC LIMIT 1''', (email,))
     target = cursor.fetchone()
-    if target and target[0]:
-        if abs(last_weight - target[0]) < 1:
-            return 'goal_achieved'
+    if target and target[0] and abs(last_weight - target[0]) < 1:
+        return 'goal_achieved'
     if diff > 0.5:
         return 'progress'
     elif abs(diff) <= 0.5:
         return 'plateau'
-    else:
-        return 'first_visit'
+    return 'first_visit'
 
 
 def play_reminder_sound():
@@ -358,12 +549,15 @@ def request_notification_permission():
     """, unsafe_allow_html=True)
 
 
-def show_notification(title, body):
+def show_notification(title: str, body: str):
+    # Экранирование для безопасности
+    title_escaped = title.replace('"', '\\"').replace("'", "\\'")
+    body_escaped = body.replace('"', '\\"').replace("'", "\\'")
     st.markdown(f"""
     <script>
     if ("Notification" in window && Notification.permission === "granted") {{
-        new Notification("{title}", {{
-            body: "{body}",
+        new Notification("{title_escaped}", {{
+            body: "{body_escaped}",
             icon: "https://cdn-icons-png.flaticon.com/512/3036/3036724.png"
         }});
     }}
@@ -372,7 +566,7 @@ def show_notification(title, body):
 
 
 # ============================================================================
-# МЕДИЦИНСКИЕ ДАННЫЕ (ВОЗ, рекомендации)
+# МЕДИЦИНСКИЕ ДАННЫЕ (константы)
 # ============================================================================
 AGE_NORMS = [(25, 19, 24), (35, 20, 25), (45, 21, 26), (55, 22, 27), (65, 23, 28)]
 AGE_FACTORS = [(30, 1.0), (40, 1.02), (50, 1.04), (60, 1.06), (float('inf'), 1.08)]
@@ -409,45 +603,52 @@ GI_PRODUCTS = {
 
 
 # ============================================================================
-# ФУНКЦИИ РАСЧЁТА
+# ФУНКЦИИ РАСЧЁТА (с кэшированием)
 # ============================================================================
-def calculate_age(birth_date):
+@st.cache_data
+def calculate_age(birth_date: date) -> int:
     today = date.today()
     age = today.year - birth_date.year
     if (today.month, today.day) < (birth_date.month, birth_date.day): age -= 1
     return age
 
 
-def get_age_group(age):
+@st.cache_data
+def get_age_group(age: int) -> str:
     if age < 30: return '18-29'
     if age < 50: return '30-49'
     if age < 65: return '50-64'
     return '65+'
 
 
-def get_sleep_group(age):
+@st.cache_data
+def get_sleep_group(age: int) -> str:
     if age < 26: return '18-25'
     if age < 65: return '26-64'
     return '65+'
 
 
-def get_activity_group(age):
+@st.cache_data
+def get_activity_group(age: int) -> str:
     return '65+' if age >= 65 else '18-64'
 
 
-def get_age_norm(age):
+@st.cache_data
+def get_age_norm(age: int) -> tuple[int, int]:
     for max_age, min_val, max_val in AGE_NORMS:
         if age < max_age: return min_val, max_val
     return 24, 29
 
 
-def get_age_factor(age):
+@st.cache_data
+def get_age_factor(age: int) -> float:
     for max_age, factor in AGE_FACTORS:
         if age < max_age: return factor
     return 1.08
 
 
-def calculate_ideal_weight(gender, height_inches, age_factor):
+@st.cache_data
+def calculate_ideal_weight(gender: str, height_inches: float, age_factor: float) -> float:
     formulas = {
         'devine': (50, 45.5, 2.3, 2.3), 'robinson': (52, 49, 1.9, 1.7),
         'miller': (56.2, 53.1, 1.41, 1.36), 'hamwi': (48, 45.5, 2.7, 2.2)
@@ -459,10 +660,11 @@ def calculate_ideal_weight(gender, height_inches, age_factor):
         r = b + m * (height_inches - 60)
         if name == 'hamwi': r *= age_factor
         results.append(r)
-    return sum(results) / len(results)
+    return round(sum(results) / len(results), 1)
 
 
-def calculate_calories(gender, weight, height_cm, age, activity):
+@st.cache_data
+def calculate_calories(gender: str, weight: float, height_cm: float, age: int, activity: str) -> tuple[int, int]:
     if gender == 'м':
         bmr = 10 * weight + 6.25 * height_cm - 5 * age + 5
     else:
@@ -472,52 +674,58 @@ def calculate_calories(gender, weight, height_cm, age, activity):
     return maintain, max(maintain - 500, 1200)
 
 
-def calculate_water(weight, activity):
+@st.cache_data
+def calculate_water(weight: float, activity: str) -> int:
     base = weight * 30
     bonus = {'Сидячий': 0, 'Умеренный': 500, 'Активный': 1000, 'Очень активный': 1500}
     return int(base + bonus[activity])
 
 
-def export_to_excel(email):
+@st.cache_data(ttl=300)  # Кэш на 5 минут
+def get_user_history(email: str, table: str, limit: int = 30) -> pd.DataFrame:
+    """Универсальная функция для получения истории (кэшируется)"""
+    queries = {
+        'measurements': '''SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ',
+            category as 'Категория', custom_calories as 'Калории' FROM measurements
+            WHERE email=? ORDER BY date DESC LIMIT ?''',
+        'body_measurements': '''SELECT date as 'Дата', waist as 'Талия', hips as 'Бёдра',
+            chest as 'Грудь', whr as 'WHR', body_fat as '% жира' FROM body_measurements
+            WHERE email=? ORDER BY date DESC LIMIT ?''',
+        'workouts': '''SELECT date as 'Дата', exercise as 'Упражнение',
+            sets as 'Подх', reps as 'Повт', weight_kg as 'Вес' FROM workouts
+            WHERE email=? ORDER BY date DESC LIMIT ?''',
+        'water': '''SELECT SUBSTR(date, 1, 10) as 'День',
+            SUM(volume_ml) as 'Всего (мл)' FROM water
+            WHERE email=? GROUP BY SUBSTR(date, 1, 10) ORDER BY date DESC LIMIT ?''',
+        'sleep': '''SELECT date as 'Дата', hours as 'Часов',
+            quality as 'Качество' FROM sleep
+            WHERE email=? ORDER BY date DESC LIMIT ?'''
+    }
+    return pd.read_sql_query(queries[table], conn, params=(email, limit))
+
+
+def export_to_excel(email: str) -> BytesIO:
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df = pd.read_sql_query('''SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ',
-            category as 'Категория', custom_calories as 'Калории' FROM measurements
-            WHERE email=? ORDER BY date''', conn, params=(email,))
-        if not df.empty: df.to_excel(writer, sheet_name='Замеры веса', index=False)
-
-        df = pd.read_sql_query('''SELECT date as 'Дата', waist as 'Талия', hips as 'Бёдра',
-            chest as 'Грудь', whr as 'WHR', whr_category as 'Категория WHR',
-            body_fat as '% жира' FROM body_measurements
-            WHERE email=? ORDER BY date''', conn, params=(email,))
-        if not df.empty: df.to_excel(writer, sheet_name='Замеры тела', index=False)
-
-        df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
-            sets as 'Подходы', reps as 'Повторения', weight_kg as 'Вес (кг)' FROM workouts
-            WHERE email=? ORDER BY date''', conn, params=(email,))
-        if not df.empty: df.to_excel(writer, sheet_name='Тренировки', index=False)
-
-        df = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День',
-            SUM(volume_ml) as 'Выпито (мл)', MAX(goal_ml) as 'Норма (мл)' FROM water
-            WHERE email=? GROUP BY SUBSTR(date, 1, 10) ORDER BY date''', conn, params=(email,))
-        if not df.empty: df.to_excel(writer, sheet_name='Вода', index=False)
-
-        df = pd.read_sql_query('''SELECT date as 'Дата', hours as 'Часов',
-            quality as 'Качество' FROM sleep
-            WHERE email=? ORDER BY date''', conn, params=(email,))
-        if not df.empty: df.to_excel(writer, sheet_name='Сон', index=False)
-
+        for table, sheet_name in [
+            ('measurements', 'Замеры веса'),
+            ('body_measurements', 'Замеры тела'),
+            ('workouts', 'Тренировки'),
+            ('water', 'Вода'),
+            ('sleep', 'Сон')
+        ]:
+            df = get_user_history(email, table, limit=1000)
+            if not df.empty:
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
     output.seek(0)
     return output
 
 
 # ============================================================================
-# ЭКРАН АВТОРИЗАЦИИ
+# ЭКРАН АВТОРИЗАЦИИ (с сбросом пароля)
 # ============================================================================
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-if 'user_email' not in st.session_state:
-    st.session_state.user_email = None
 
 if not st.session_state.logged_in:
     set_background("🌌 Градиент (по умолчанию)")
@@ -525,30 +733,34 @@ if not st.session_state.logged_in:
     st.markdown("""
     <div style='text-align: center; padding: 40px 20px;'>
         <h1 style='color: #2c5f8d; font-size: 48px;'>🏥 Health Platform 360°</h1>
-        <p style='color: #555; font-size: 18px;'>Ваш персональный помощник для комплексного управления здоровьем</p>
+        <p style='color: #555; font-size: 18px;'>Ваш персональный помощник для здоровья</p>
     </div>
     """, unsafe_allow_html=True)
 
-    auth_tab1, auth_tab2 = st.tabs(["🔐 Вход", "📝 Регистрация"])
+    auth_tab1, auth_tab2, auth_tab3 = st.tabs(["🔐 Вход", "📝 Регистрация", "🔑 Забыли пароль?"])
 
+    # ВХОД
     with auth_tab1:
         st.markdown("### 👋 С возвращением!")
         login_email = st.text_input("Email", key="login_email")
         login_password = st.text_input("Пароль", type="password", key="login_password")
 
-        if st.button("🚪 Войти", type="primary", use_container_width=True):
-            user = login_user(login_email, login_password)
-            if user:
-                st.session_state.logged_in = True
-                st.session_state.user_email = login_email
-                st.session_state.user_data = {
-                    'surname': user[1], 'name': user[2], 'birth_date': user[3],
-                    'gender': user[4], 'background': user[7] or '🌌 Градиент (по умолчанию)'
-                }
-                st.rerun()
-            else:
-                st.error("❌ Неверный email или пароль")
+        # Проверка блокировки
+        is_allowed, remaining = check_login_attempts(login_email)
+        if not is_allowed and login_email:
+            st.error(f"⚠️ Слишком много попыток. Подождите {remaining // 60} минут.")
+        else:
+            if st.button("🚪 Войти", type="primary", use_container_width=True):
+                success, message, user_data = login_user(login_email, login_password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.user_email = login_email
+                    st.session_state.user_data = user_data
+                    st.rerun()
+                else:
+                    st.error(message)
 
+    # РЕГИСТРАЦИЯ
     with auth_tab2:
         st.markdown("### ✨ Создайте аккаунт")
         reg_email = st.text_input("Email", key="reg_email")
@@ -561,24 +773,73 @@ if not st.session_state.logged_in:
                                       min_value=date(1920, 1, 1), max_value=date.today(),
                                       key="reg_birth")
             reg_gender = st.radio("Пол", ["м", "ж"], horizontal=True, key="reg_gender")
-        reg_password = st.text_input("Пароль (мин. 6 символов)", type="password", key="reg_password")
+
+        reg_password = st.text_input("Пароль (мин. 8 символов, буквы + цифры)",
+                                     type="password", key="reg_password")
         reg_password2 = st.text_input("Повторите пароль", type="password", key="reg_password2")
 
+        # Секретный вопрос для сброса пароля
+        st.markdown("---")
+        st.markdown("### 🔐 Секретный вопрос (для сброса пароля)")
+        st.caption("⚠️ Выберите вопрос и запомните ответ — это единственный способ восстановить доступ!")
+
+        secret_questions = [
+            "Кличка вашего первого питомца?",
+            "Название вашей первой школы?",
+            "Город, где вы родились?",
+            "Любимое блюдо из детства?",
+            "Имя лучшего друга из детства?"
+        ]
+        secret_question = st.selectbox("Выберите секретный вопрос", secret_questions, key="secret_q")
+        secret_answer = st.text_input("Ваш ответ (не забудьте!)", key="secret_a")
+
         if st.button("🎉 Зарегистрироваться", type="primary", use_container_width=True):
-            if not all([reg_email, reg_surname, reg_name, reg_password]):
+            if not all([reg_email, reg_surname, reg_name, reg_password, secret_answer]):
                 st.error("❌ Заполните все поля")
-            elif len(reg_password) < 6:
-                st.error("❌ Пароль должен быть не менее 6 символов")
             elif reg_password != reg_password2:
                 st.error("❌ Пароли не совпадают")
-            elif "@" not in reg_email:
-                st.error("❌ Неверный email")
+            elif len(secret_answer.strip()) < 2:
+                st.error("❌ Ответ на секретный вопрос слишком короткий")
             else:
-                if register_user(reg_email, reg_surname, reg_name,
-                                 reg_birth.strftime("%d.%m.%Y"), reg_gender, reg_password):
-                    st.success("✅ Регистрация успешна! Теперь войдите.")
+                success, message = register_user(
+                    reg_email, reg_surname, reg_name,
+                    reg_birth.strftime("%d.%m.%Y"), reg_gender,
+                    reg_password, secret_question, secret_answer
+                )
+                if success:
+                    st.success(f"✅ {message}! Теперь войдите.")
+                    st.info("💡 Запомните ответ на секретный вопрос — он нужен для сброса пароля!")
                 else:
-                    st.error("❌ Пользователь с таким email уже существует")
+                    st.error(f"❌ {message}")
+
+    # СБРОС ПАРОЛЯ
+    with auth_tab3:
+        st.markdown("### 🔑 Восстановление доступа")
+        st.caption("Введите email и ответ на секретный вопрос, который вы указали при регистрации.")
+
+        reset_email = st.text_input("Email аккаунта", key="reset_email")
+
+        if reset_email:
+            question = get_secret_question(reset_email)
+            if question:
+                st.info(f"📝 Ваш секретный вопрос: **{question}**")
+                reset_answer = st.text_input("Ваш ответ", key="reset_answer")
+                reset_password_new = st.text_input("Новый пароль (мин. 8 символов)",
+                                                   type="password", key="reset_pwd")
+                reset_password_new2 = st.text_input("Повторите новый пароль",
+                                                    type="password", key="reset_pwd2")
+
+                if st.button("🔄 Сменить пароль", type="primary"):
+                    if reset_password_new != reset_password_new2:
+                        st.error("❌ Пароли не совпадают")
+                    else:
+                        success, message = reset_password(reset_email, reset_answer, reset_password_new)
+                        if success:
+                            st.success(f"✅ {message}! Теперь войдите с новым паролем.")
+                        else:
+                            st.error(f"❌ {message}")
+            else:
+                st.warning("⚠️ Пользователь с таким email не найден")
 
     st.stop()
 
@@ -590,21 +851,18 @@ user_data = st.session_state.user_data
 
 set_background(user_data.get('background', '🌌 Градиент (по умолчанию)'))
 
-# Запрос разрешений на уведомления
 if 'notification_requested' not in st.session_state:
     request_notification_permission()
     st.session_state.notification_requested = True
 
-# ============================================================================
 # 🔔 ПРОВЕРКА НАПОМИНАНИЙ
-# ============================================================================
 reminder_needed, days_passed = check_reminder_needed(user_email)
 
 if reminder_needed and not st.session_state.get('reminder_shown_today'):
     play_reminder_sound()
     show_notification(
         "🏥 Health Platform 360°",
-        f"Прошло {days_passed} дней с последнего замера. Пора внести новые данные!"
+        f"Прошло {days_passed} дней с последнего замера."
     )
 
     st.markdown("""
@@ -628,21 +886,18 @@ if reminder_needed and not st.session_state.get('reminder_shown_today'):
         <h2>⏰ Время позаботиться о себе!</h2>
         <p>Прошло <b>{days_passed} дней</b> с последнего замера.</p>
         <p>Регулярные измерения — ключ к успеху! 🎯</p>
-        <p style='font-size: 14px; opacity: 0.9;'>💡 Совет: взвешивайся утром натощак, после туалета, до еды и воды.</p>
     </div>
     """, unsafe_allow_html=True)
 
     if st.button("✅ Понятно, взвешусь сегодня!", type="primary", use_container_width=True):
         st.session_state.reminder_shown_today = True
-        st.success("🎉 Отлично! Ждём твои новые данные!")
+        st.success("🎉 Отлично!")
         st.balloons()
         st.rerun()
 
     st.markdown("---")
 
-# ============================================================================
 # БОКОВОЕ МЕНЮ
-# ============================================================================
 st.sidebar.markdown("## 🏥 Health Platform 360°")
 st.sidebar.markdown(f"### 👤 {user_data['name']} {user_data['surname']}")
 st.sidebar.caption(f"📧 {user_email}")
@@ -661,9 +916,7 @@ except:
 age = calculate_age(birth_date)
 gender = user_data['gender']
 
-# ============================================================================
-# 🎯 МОТИВАЦИОННЫЙ БЛОК В САЙДБАРЕ
-# ============================================================================
+# 🎯 МОТИВАЦИОННЫЙ БЛОК
 progress_status = check_progress(user_email)
 
 if progress_status == 'goal_achieved':
@@ -726,7 +979,7 @@ if section == "🏠 Главная":
     if st.button("💾 Сохранить замер", type="primary"):
         height_inches = height_cm / 2.54
         age_factor = get_age_factor(age)
-        ideal_weight = round(calculate_ideal_weight(gender, height_inches, age_factor), 1)
+        ideal_weight = calculate_ideal_weight(gender, height_inches, age_factor)
 
         if bmi < norm_min:
             cat = "Недостаточный вес"
@@ -756,7 +1009,6 @@ elif section == "📏 Замеры тела":
     st.markdown("<h1>📏 Замеры тела</h1>", unsafe_allow_html=True)
     st.markdown("""
     **Зачем нужны замеры окружностей?**
-    Вес на весах не показывает всю картину. Окружности помогают:
     - 🎯 Отличить потерю жира от потери мышц
     - 📊 Рассчитать индекс WHR — маркер сердечно-сосудистых рисков
     - 💪 Оценить процент жира в организме
@@ -769,17 +1021,12 @@ elif section == "📏 Замеры тела":
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        waist = st.number_input("🎯 Талия (см)", 40.0, 200.0, 75.0, 0.5,
-                                help="В самом узком месте, на уровне пупка", key="b_waist")
-        hips = st.number_input("🍑 Бёдра (см)", 50.0, 200.0, 95.0, 0.5,
-                               help="В самом широком месте ягодиц", key="b_hips")
-        chest = st.number_input("👚 Грудь (см)", 50.0, 200.0, 90.0, 0.5,
-                                help="По самым выступающим точкам", key="b_chest")
+        waist = st.number_input("🎯 Талия (см)", 40.0, 200.0, 75.0, 0.5, key="b_waist")
+        hips = st.number_input("🍑 Бёдра (см)", 50.0, 200.0, 95.0, 0.5, key="b_hips")
+        chest = st.number_input("👚 Грудь (см)", 50.0, 200.0, 90.0, 0.5, key="b_chest")
     with c2:
-        neck = st.number_input("🦢 Шея (см)", 20.0, 60.0, 35.0, 0.5,
-                               help="Под кадыком", key="b_neck")
-        arm = st.number_input("💪 Рука (см)", 15.0, 60.0, 28.0, 0.5,
-                              help="В самом широком месте бицепса", key="b_arm")
+        neck = st.number_input("🦢 Шея (см)", 20.0, 60.0, 35.0, 0.5, key="b_neck")
+        arm = st.number_input("💪 Рука (см)", 15.0, 60.0, 28.0, 0.5, key="b_arm")
 
     if waist and hips:
         whr, whr_cat = calculate_whr(waist, hips, gender)
@@ -791,37 +1038,24 @@ elif section == "📏 Замеры тела":
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("📐 WHR (талия/бёдра)", whr)
+            st.metric("📐 WHR", whr)
             st.caption(whr_cat)
         with c2:
             st.metric("⚠️ Риск по талии", waist_risk)
         with c3:
             if bf is not None:
-                st.metric("🔥 % жира в организме", f"{bf}%")
+                st.metric("🔥 % жира", f"{bf}%")
                 st.caption(bf_cat)
 
         st.markdown("---")
-        st.markdown("### 💡 Рекомендации по вашим замерам")
+        st.markdown("### 💡 Рекомендации")
 
         if whr_cat and "Высокий" in whr_cat:
-            st.error("""
-            🔴 **Высокий WHR** — повышенный риск сердечно-сосудистых заболеваний.
-            **Что делать:**
-            - Снизить потребление простых углеводов и сахара
-            - Увеличить аэробную нагрузку 150+ мин/нед
-            - Добавить силовые тренировки
-            """)
+            st.error("🔴 Высокий WHR — повышенный риск ССЗ. Увеличьте аэробную нагрузку.")
         elif whr_cat and "Умеренный" in whr_cat:
-            st.warning("🟡 Умеренный WHR — стоит обратить внимание на питание и активность.")
+            st.warning("🟡 Умеренный WHR — обратите внимание на питание.")
         else:
-            st.success("🟢 WHR в норме — отличный показатель!")
-
-        if waist_risk and "Высокий" in waist_risk:
-            st.error(f"🔴 Окружность талии {waist} см говорит об абдоминальном ожирении.")
-
-        if bf is not None:
-            if (bf > 32 and gender == 'ж') or (bf > 25 and gender == 'м'):
-                st.warning(f"📊 Процент жира {bf}% выше среднего. Фокус на силовые + дефицит калорий.")
+            st.success("🟢 WHR в норме!")
 
     if st.button("💾 Сохранить замеры", type="primary"):
         if waist and hips:
@@ -840,22 +1074,14 @@ elif section == "📏 Замеры тела":
 
     st.markdown("---")
     st.markdown("### 📈 История замеров")
-    df = pd.read_sql_query('''SELECT date as 'Дата', waist as 'Талия', hips as 'Бёдра',
-        chest as 'Грудь', whr as 'WHR', whr_category as 'Категория WHR',
-        body_fat as '% жира' FROM body_measurements
-        WHERE email=? ORDER BY date DESC LIMIT 14''', conn, params=(user_email,))
+    df = get_user_history(user_email, 'body_measurements', 14)
 
     if not df.empty:
         st.dataframe(df, use_container_width=True, hide_index=True)
         chart_df = df[['Дата', 'Талия', 'Бёдра', 'Грудь']].set_index('Дата')
-        st.markdown("**Динамика окружностей:**")
         st.line_chart(chart_df)
-        if 'WHR' in df.columns:
-            whr_chart = df[['Дата', 'WHR']].set_index('Дата')
-            st.markdown("**Динамика WHR:**")
-            st.line_chart(whr_chart)
     else:
-        st.info("Пока нет записей. Сделайте первый замер!")
+        st.info("Пока нет записей")
 
 # ============================================================================
 # 🥗 ПИТАНИЕ
@@ -871,21 +1097,19 @@ elif section == "🥗 Питание":
     cal_m, cal_l = calculate_calories(gender, weight, height_cm, age, activity)
     norms = NUTRITION_BY_AGE[age_group]
 
-    st.info(f"🤖 **Рекомендация формулы:** {cal_l} ккал/день (безопасный дефицит 500 ккал)")
+    st.info(f"🤖 **Рекомендация:** {cal_l} ккал/день")
 
     custom_calories = st.number_input(
         "✏️ Моя целевая калорийность (ккал):",
-        min_value=800, max_value=4000, value=cal_l, step=50,
-        help="Измените, если знаете особенности своего метаболизма", key="food_custom_cal"
+        min_value=800, max_value=4000, value=cal_l, step=50, key="food_custom_cal"
     )
 
     if custom_calories < 1200:
-        st.warning("""⚠️ **ВАЖНО:** Потребление менее 1200 ккал ниже безопасного минимума ВОЗ.
-        Обязательно: проконсультируйтесь с врачом, принимайте витамины, следите за белком.""")
+        st.warning("⚠️ Менее 1200 ккал — ниже безопасного минимума ВОЗ.")
     elif custom_calories < 1400:
-        st.info("💡 Умеренно низкая калорийность. Увеличьте долю белка и овощей.")
+        st.info("💡 Умеренно низкая калорийность.")
     else:
-        st.success("✅ Безопасный диапазон калорий.")
+        st.success("✅ Безопасный диапазон.")
 
     target_protein = round((custom_calories * 0.30) / 4, 1)
     target_fat = round((custom_calories * 0.30) / 9, 1)
@@ -902,27 +1126,27 @@ elif section == "🥗 Питание":
     with tab1:
         st.markdown(f"### 🎯 Возрастная группа: **{age_group}**")
         if age_group == '18-29':
-            st.info("🔥 Метаболизм на пике. Формируйте здоровые привычки.")
+            st.info("🔥 Метаболизм на пике.")
         elif age_group == '30-49':
-            st.info("⚠️ Метаболизм замедляется. Увеличьте долю белка.")
+            st.info("⚠️ Метаболизм замедляется.")
         elif age_group == '50-64':
-            st.info("🦴 Важно: кальций, витамин D, омега-3.")
+            st.info("🦴 Важно: кальций, витамин D.")
         else:
-            st.info("👴 Нужно БОЛЬШЕ белка (1.2-1.5 г/кг) для сохранения мышц.")
+            st.info("👴 Нужно БОЛЬШЕ белка.")
 
         st.markdown(f"""
         - 💧 Вода: **{calculate_water(weight, activity)} мл**
         - 🥦 Клетчатка: **{norms['fiber']} г/день**
-        - 🧂 Соль: не более **5 г** (ВОЗ)
-        - 🍬 Сахар: не более **25 г** добавленного (ВОЗ)
+        - 🧂 Соль: не более **5 г**
+        - 🍬 Сахар: не более **25 г**
         """)
 
     with tab2:
         foods = {
-            'Белки': ['🐟 Рыба 2-3 раза/нед', '🍗 Куриная грудка', '🥚 Яйца', '🫘 Бобовые', '🥛 Творог'],
+            'Белки': ['🐟 Рыба', '🍗 Курица', '🥚 Яйца', '🫘 Бобовые', '🥛 Творог'],
             'Углеводы': ['🌾 Гречка', '🍚 Бурый рис', '🥔 Батат', '🍞 Цельнозерновой хлеб'],
-            'Жиры': ['🥑 Авокадо', '🫒 Оливковое масло', '🥜 Орехи 30г/день', '🐟 Жирная рыба'],
-            'Овощи/Фрукты': ['🥬 5 порций в день', '🫐 Ягоды', '🍎 Сезонные фрукты']
+            'Жиры': ['🥑 Авокадо', '🫒 Оливковое масло', '🥜 Орехи', '🐟 Жирная рыба'],
+            'Овощи': ['🥬 5 порций/день', '🫐 Ягоды', '🍎 Фрукты']
         }
         cols = st.columns(4)
         for i, (cat, items) in enumerate(foods.items()):
@@ -933,12 +1157,12 @@ elif section == "🥗 Питание":
 
     with tab3:
         st.markdown("""
-        - 🍞 **Белый хлеб, выпечка** (ГИ 75+)
-        - 🍟 **Жареное, фастфуд**
-        - 🍬 **Сладости, газировки**
-        - 🥓 **Переработанное мясо** (сосиски, колбаса)
-        - 🍺 **Алкоголь**
-        - 🧂 **Избыток соли**
+        - 🍞 Белый хлеб, выпечка
+        - 🍟 Жареное, фастфуд
+        - 🍬 Сладости, газировки
+        - 🥓 Переработанное мясо
+        - 🍺 Алкоголь
+        - 🧂 Избыток соли
         """)
 
     with tab4:
@@ -958,10 +1182,9 @@ elif section == "💪 Тренировки":
     rec = ACTIVITY_BY_AGE[act_group]
 
     st.info(f"""
-    🏃 **Аэробная нагрузка:** {rec['aerobic']}  
+    🏃 **Аэробная:** {rec['aerobic']}  
     🏋️ **Силовая:** {rec['strength']}
     """)
-    st.markdown("**Примеры:** " + ", ".join(rec['examples']))
 
     st.markdown("---")
     st.markdown("### 📝 Записать тренировку")
@@ -989,9 +1212,7 @@ elif section == "💪 Тренировки":
 
     st.markdown("---")
     st.markdown("### 📖 История")
-    df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
-        sets as 'Подходы', reps as 'Повторения', weight_kg as 'Вес (кг)', notes as 'Заметки'
-        FROM workouts WHERE email=? ORDER BY date DESC LIMIT 20''', conn, params=(user_email,))
+    df = get_user_history(user_email, 'workouts', 20)
 
     if not df.empty:
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -1008,7 +1229,7 @@ elif section == "💧 Вода":
     activity = st.selectbox("Активность", ["Сидячий", "Умеренный", "Активный", "Очень активный"], key="water_activity")
     daily_goal = calculate_water(weight, activity)
 
-    st.markdown(f"### 🎯 Норма: **{daily_goal} мл** ({round(daily_goal / 250, 1)} стаканов)")
+    st.markdown(f"### 🎯 Норма: **{daily_goal} мл**")
 
     today = datetime.now().strftime("%d.%m.%Y")
     df_today = pd.read_sql_query('''SELECT SUM(volume_ml) as total FROM water
@@ -1020,8 +1241,6 @@ elif section == "💧 Вода":
 
     if progress >= 1.0:
         st.success("🎉 Норма выполнена!")
-    elif progress >= 0.7:
-        st.info("💪 Осталось немного!")
 
     st.markdown("---")
     c1, c2, c3 = st.columns([1, 1, 2])
@@ -1043,10 +1262,7 @@ elif section == "💧 Вода":
 
     st.markdown("---")
     st.markdown("### 📊 История")
-    df_hist = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День', 
-        SUM(volume_ml) as 'Выпито (мл)', MAX(goal_ml) as 'Норма (мл)' FROM water
-        WHERE email=? GROUP BY SUBSTR(date, 1, 10) ORDER BY date DESC LIMIT 14''',
-                                conn, params=(user_email,))
+    df_hist = get_user_history(user_email, 'water', 14)
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
         st.line_chart(df_hist.set_index('День'))
@@ -1058,7 +1274,7 @@ elif section == "😴 Сон":
     st.markdown("<h1>😴 Трекер сна</h1>", unsafe_allow_html=True)
 
     sl_group = get_sleep_group(age)
-    sl_min, sl_max, sl_text = SLEEP_BY_AGE[sl_group]
+    sl_min, sl_max, _ = SLEEP_BY_AGE[sl_group]
     st.markdown(f"### 🎯 Норма: **{sl_min}-{sl_max} часов**")
 
     c1, c2, c3 = st.columns(3)
@@ -1088,7 +1304,7 @@ elif section == "😴 Сон":
             conn.commit()
 
             if sl_min <= hours <= sl_max:
-                st.success(f"✅ Отлично! **{hours} ч** — в норме!")
+                st.success(f"✅ **{hours} ч** — в норме!")
             elif hours < sl_min:
                 st.warning(f"⚠️ **{hours} ч** — меньше нормы")
             else:
@@ -1096,9 +1312,7 @@ elif section == "😴 Сон":
 
     st.markdown("---")
     st.markdown("### 📊 История")
-    df = pd.read_sql_query('''SELECT date as 'Дата', bedtime as 'Лёг', wake_time as 'Встал',
-        hours as 'Часов', quality as 'Качество' FROM sleep
-        WHERE email=? ORDER BY date DESC LIMIT 14''', conn, params=(user_email,))
+    df = get_user_history(user_email, 'sleep', 14)
     if not df.empty:
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.line_chart(df[['Дата', 'Часов']].set_index('Дата'))
@@ -1112,9 +1326,7 @@ elif section == "📊 История":
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚖️ Вес", "📏 Тело", "💪 Тренировки", "💧 Вода", "😴 Сон"])
 
     with tab1:
-        df = pd.read_sql_query('''SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ',
-            category as 'Категория', custom_calories as 'Калории' FROM measurements
-            WHERE email=? ORDER BY date DESC''', conn, params=(user_email,))
+        df = get_user_history(user_email, 'measurements', 30)
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
             if len(df) >= 2:
@@ -1123,9 +1335,7 @@ elif section == "📊 История":
             st.info("Нет записей")
 
     with tab2:
-        df = pd.read_sql_query('''SELECT date as 'Дата', waist as 'Талия', hips as 'Бёдра',
-            chest as 'Грудь', whr as 'WHR', body_fat as '% жира' FROM body_measurements
-            WHERE email=? ORDER BY date DESC LIMIT 30''', conn, params=(user_email,))
+        df = get_user_history(user_email, 'body_measurements', 30)
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
             chart = df[['Дата', 'Талия', 'Бёдра', 'Грудь']].set_index('Дата')
@@ -1134,19 +1344,14 @@ elif section == "📊 История":
             st.info("Нет записей")
 
     with tab3:
-        df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
-            sets as 'Подх', reps as 'Повт', weight_kg as 'Вес' FROM workouts
-            WHERE email=? ORDER BY date DESC LIMIT 30''', conn, params=(user_email,))
+        df = get_user_history(user_email, 'workouts', 30)
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("Нет записей")
 
     with tab4:
-        df = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День',
-            SUM(volume_ml) as 'Всего (мл)' FROM water
-            WHERE email=? GROUP BY SUBSTR(date, 1, 10) ORDER BY date DESC LIMIT 14''',
-                               conn, params=(user_email,))
+        df = get_user_history(user_email, 'water', 14)
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.line_chart(df.set_index('День'))
@@ -1154,9 +1359,7 @@ elif section == "📊 История":
             st.info("Нет записей")
 
     with tab5:
-        df = pd.read_sql_query('''SELECT date as 'Дата', hours as 'Часов',
-            quality as 'Качество' FROM sleep
-            WHERE email=? ORDER BY date DESC LIMIT 14''', conn, params=(user_email,))
+        df = get_user_history(user_email, 'sleep', 14)
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.line_chart(df[['Дата', 'Часов']].set_index('Дата'))
@@ -1186,8 +1389,6 @@ elif section == "⚙️ Настройки":
 
     # Мотивация
     st.markdown("### 💪 Мотивация")
-    st.caption("Нажми кнопку, чтобы получить новую мотивирующую фразу!")
-
     if st.button("🎲 Новая мотивирующая фраза"):
         st.session_state.motivation_refresh = True
         st.rerun()
@@ -1200,9 +1401,7 @@ elif section == "⚙️ Настройки":
     st.markdown("---")
 
     # Экспорт в Excel
-    st.markdown("### 📊 Экспорт всей истории в Excel")
-    st.caption("Скачайте полную историю всех замеров, тренировок, воды и сна в одном файле.")
-
+    st.markdown("### 📊 Экспорт в Excel")
     if st.button("📥 Сформировать Excel-отчёт", type="primary"):
         excel_file = export_to_excel(user_email)
         st.download_button(
@@ -1212,26 +1411,14 @@ elif section == "⚙️ Настройки":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        st.success("✅ Файл готов! Нажмите кнопку выше для скачивания.")
 
     st.markdown("---")
 
     # PWA инструкция
     st.markdown("### 📱 Установить как приложение (PWA)")
     st.markdown("""
-    **На iPhone (Safari):**
-    1. Откройте это приложение в Safari
-    2. Нажмите кнопку "Поделиться" (квадрат со стрелкой)
-    3. Выберите "На экран «Домой»"
-    4. Нажмите "Добавить"
-
-    **На Android (Chrome):**
-    1. Откройте это приложение в Chrome
-    2. Нажмите меню (⋮) в правом верхнем углу
-    3. Выберите "Добавить на главный экран"
-    4. Нажмите "Установить"
-
-    Теперь приложение будет открываться как обычное приложение на вашем телефоне! 🎉
+    **iPhone (Safari):** Поделиться → На экран «Домой»  
+    **Android (Chrome):** Меню (⋮) → Добавить на главный экран
     """)
 
     st.markdown("---")
