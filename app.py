@@ -15,7 +15,7 @@ st.set_page_config(page_title="Дневник похудения PRO", page_icon
 # ============================================================================
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('diary_database.db', check_same_thread=False)
+    conn = sqlite3.connect('diary_database_v2.db', check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
