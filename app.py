@@ -1,23 +1,32 @@
 # ============================================================================
-# 🏥 HEALTH PLATFORM 360° PRO — С замерами тела и Excel-экспортом
+# 🏥 HEALTH PLATFORM 360° PRO — ФИНАЛЬНАЯ ВЕРСИЯ
+# С мотивацией, напоминаниями, замерами тела и Excel-экспортом
 # ============================================================================
 
 import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
+import random
 from datetime import datetime, timedelta, date
 from io import BytesIO
 
-st.set_page_config(page_title="Health Platform 360°", page_icon="🏥", layout="wide")
+# ============================================================================
+# НАСТРОЙКА СТРАНИЦЫ + PWA
+# ============================================================================
+st.set_page_config(
+    page_title="Health Platform 360°",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ============================================================================
-# PWA META-TEGS
-# ============================================================================
 st.markdown("""
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#2c5f8d">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Health 360">
 <link rel="manifest" href="manifest.json">
 """, unsafe_allow_html=True)
 
@@ -56,11 +65,11 @@ def set_background(bg_name):
 
 
 # ============================================================================
-# БАЗА ДАННЫХ (6 таблиц: + body_measurements)
+# БАЗА ДАННЫХ (v6 — финальная структура)
 # ============================================================================
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('health_platform_v5.db', check_same_thread=False)
+    conn = sqlite3.connect('health_platform_v6.db', check_same_thread=False)
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -76,14 +85,11 @@ def init_db():
         calories_maintain INT, calories_lose INT, custom_calories INT
     )''')
 
-    # 🆕 НОВАЯ ТАБЛИЦА: замеры тела
     c.execute('''CREATE TABLE IF NOT EXISTS body_measurements (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT, date TEXT,
-        waist REAL, hips REAL, chest REAL,
-        neck REAL, arm REAL,
-        whr REAL, whr_category TEXT,
-        body_fat REAL, body_fat_category TEXT
+        waist REAL, hips REAL, chest REAL, neck REAL, arm REAL,
+        whr REAL, whr_category TEXT, body_fat REAL, body_fat_category TEXT
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS workouts (
@@ -111,7 +117,7 @@ conn = init_db()
 
 
 # ============================================================================
-# ФУНКЦИИ АВТОРИЗАЦИИ (упрощённые, без SMTP)
+# ФУНКЦИИ АВТОРИЗАЦИИ
 # ============================================================================
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -139,16 +145,12 @@ def login_user(email, password):
 
 
 # ============================================================================
-# 🆕 МЕДИЦИНСКИЕ ФУНКЦИИ ДЛЯ ЗАМЕРОВ ТЕЛА
+# МЕДИЦИНСКИЕ ФУНКЦИИ
 # ============================================================================
-
 def calculate_whr(waist, hips, gender):
-    """Waist-to-Hip Ratio — индекс талия/бёдра (ВОЗ)"""
     if not hips or hips == 0:
         return None, None
     whr = round(waist / hips, 2)
-
-    # Нормы ВОЗ по полу
     if gender == 'ж':
         if whr < 0.80:
             cat = "Низкий риск 🟢"
@@ -163,40 +165,32 @@ def calculate_whr(waist, hips, gender):
             cat = "Умеренный риск 🟡"
         else:
             cat = "Высокий риск 🔴"
-
     return whr, cat
 
 
 def calculate_waist_risk(waist, gender):
-    """Оценка риска по окружности талии (ВОЗ)"""
     if not waist:
         return None
     if gender == 'ж':
         if waist < 80: return "Норма 🟢"
         if waist < 88: return "Повышенный риск 🟡"
-        return "Высокий риск 🔴 (абдоминальное ожирение)"
+        return "Высокий риск 🔴"
     else:
         if waist < 94: return "Норма 🟢"
         if waist < 102: return "Повышенный риск 🟡"
-        return "Высокий риск 🔴 (абдоминальное ожирение)"
+        return "Высокий риск 🔴"
 
 
 def calculate_body_fat_navy(waist, hips, neck, height_cm, gender):
-    """% жира по формуле ВМС США (US Navy Method)"""
     if gender == 'м':
         if not all([waist, neck, height_cm]):
             return None, None
-        # Формула для мужчин (в см)
         bf = 495 / (1.0324 - 0.19077 * (waist - neck) / 2.54 + 0.15456 * height_cm / 2.54) - 450
     else:
         if not all([waist, hips, neck, height_cm]):
             return None, None
-        # Формула для женщин (в см)
         bf = 495 / (1.29579 - 0.35004 * (waist + hips - neck) / 2.54 + 0.22100 * height_cm / 2.54) - 450
-
     bf = round(bf, 1)
-
-    # Классификация по ACE (American Council on Exercise)
     if gender == 'м':
         if bf < 6:
             cat = "Соревновательный уровень 🏆"
@@ -219,12 +213,166 @@ def calculate_body_fat_navy(waist, hips, neck, height_cm, gender):
             cat = "Средний уровень 📊"
         else:
             cat = "Выше среднего ⚠️"
-
     return bf, cat
 
 
 # ============================================================================
-# МЕДИЦИНСКИЕ ДАННЫЕ (остальные)
+# 🎯 МОТИВАЦИОННЫЕ ФРАЗЫ
+# ============================================================================
+MOTIVATION_QUOTES = {
+    'first_visit': [
+        "🌟 Первый шаг — самый важный. Ты уже молодец, что начала!",
+        "🚀 Путь в 1000 км начинается с одного шага. Ты его сделала!",
+        "💎 Забота о себе — лучшая инвестиция. Добро пожаловать!",
+        "🌱 Каждое большое изменение начинается с маленького решения.",
+    ],
+    'progress': [
+        "💪 Видишь результат? Твоё тело говорит тебе 'спасибо'!",
+        "🏆 Прогресс есть! Продолжай в том же духе!",
+        "✨ Ты становишься лучшей версией себя каждый день!",
+        "🔥 Дисциплина — это мост между целями и достижениями!",
+        "🎯 Маленькие шаги каждый день = большие результаты!",
+    ],
+    'plateau': [
+        "🌊 Плато — это не остановка, а подготовка к новому рывку!",
+        "💎 Тело перестраивается. Доверяй процессу!",
+        "🏔️ Самые красивые виды открываются после самого трудного подъёма!",
+        "🌱 Иногда кажется, что стоишь на месте, а корни растут вниз.",
+        "🧘 Терпение — ключ к долгосрочным результатам!",
+    ],
+    'goal_achieved': [
+        "🎉 ЦЕЛЬ ДОСТИГНУТА! Ты — настоящая героиня!",
+        "🏆 Ты доказала себе, что можешь всё! Горжусь тобой!",
+        "👑 Это твоя победа! Запомни это чувство!",
+        "🌟 Ты вдохновляешь! Поделись своим успехом с миром!",
+    ],
+    'daily_random': [
+        "💧 Не забудь про воду сегодня!",
+        "🥗 Добавь овощей в следующий приём пищи!",
+        "🚶 10 000 шагов — твоя цель на сегодня!",
+        "😴 Хороший сон = хороший результат. Ложись пораньше!",
+        "🧘 5 минут растяжки изменят твой день!",
+        "🍎 Фрукт вместо десерта — маленькая победа!",
+        "💪 Каждая тренировка делает тебя сильнее!",
+        "🌞 Утро начинается с стакана воды!",
+        "📏 Замеры важнее веса. Измерь окружности!",
+        "🥑 Полезные жиры — твои друзья!",
+    ],
+    'reminder': [
+        "⏰ Пора взвеситься! Данные помогают отслеживать прогресс.",
+        "📏 Неделя прошла — время для новых замеров!",
+        "🎯 Регулярность — секрет успеха. Внеси данные!",
+        "💡 Маленький шаг сегодня = большой результат завтра!",
+    ]
+}
+
+
+def get_motivation_quote(category='daily_random'):
+    quotes = MOTIVATION_QUOTES.get(category, MOTIVATION_QUOTES['daily_random'])
+    return random.choice(quotes)
+
+
+def check_reminder_needed(email):
+    cursor = conn.cursor()
+    cursor.execute('''SELECT MAX(date) FROM measurements WHERE email=?''', (email,))
+    last_weight = cursor.fetchone()[0]
+    cursor.execute('''SELECT MAX(date) FROM body_measurements WHERE email=?''', (email,))
+    last_body = cursor.fetchone()[0]
+    dates = [d for d in [last_weight, last_body] if d]
+    if not dates:
+        return False, None
+    try:
+        last_date = max(datetime.strptime(d, "%d.%m.%Y %H:%M") for d in dates)
+        days_passed = (datetime.now() - last_date).days
+        return days_passed >= 7, days_passed
+    except:
+        return False, None
+
+
+def check_progress(email):
+    cursor = conn.cursor()
+    cursor.execute('''SELECT weight FROM measurements WHERE email=? 
+                      ORDER BY date DESC LIMIT 10''', (email,))
+    weights = [row[0] for row in cursor.fetchall()]
+    if len(weights) < 2:
+        return 'first_visit'
+    first_weight = weights[-1]
+    last_weight = weights[0]
+    diff = first_weight - last_weight
+    cursor.execute('''SELECT target_weight FROM measurements WHERE email=? 
+                      ORDER BY date DESC LIMIT 1''', (email,))
+    target = cursor.fetchone()
+    if target and target[0]:
+        if abs(last_weight - target[0]) < 1:
+            return 'goal_achieved'
+    if diff > 0.5:
+        return 'progress'
+    elif abs(diff) <= 0.5:
+        return 'plateau'
+    else:
+        return 'first_visit'
+
+
+def play_reminder_sound():
+    st.markdown("""
+    <script>
+    function playBeep() {
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.frequency.value = 800;
+            oscillator.type = 'sine';
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+            setTimeout(() => {
+                const osc2 = audioContext.createOscillator();
+                const gain2 = audioContext.createGain();
+                osc2.connect(gain2);
+                gain2.connect(audioContext.destination);
+                osc2.frequency.value = 1000;
+                osc2.type = 'sine';
+                gain2.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gain2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                osc2.start(audioContext.currentTime);
+                osc2.stop(audioContext.currentTime + 0.5);
+            }, 300);
+        } catch(e) { console.log('Audio error:', e); }
+    }
+    playBeep();
+    </script>
+    """, unsafe_allow_html=True)
+
+
+def request_notification_permission():
+    st.markdown("""
+    <script>
+    if ("Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+    }
+    </script>
+    """, unsafe_allow_html=True)
+
+
+def show_notification(title, body):
+    st.markdown(f"""
+    <script>
+    if ("Notification" in window && Notification.permission === "granted") {{
+        new Notification("{title}", {{
+            body: "{body}",
+            icon: "https://cdn-icons-png.flaticon.com/512/3036/3036724.png"
+        }});
+    }}
+    </script>
+    """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# МЕДИЦИНСКИЕ ДАННЫЕ (ВОЗ, рекомендации)
 # ============================================================================
 AGE_NORMS = [(25, 19, 24), (35, 20, 25), (45, 21, 26), (55, 22, 27), (65, 23, 28)]
 AGE_FACTORS = [(30, 1.0), (40, 1.02), (50, 1.04), (60, 1.06), (float('inf'), 1.08)]
@@ -261,7 +409,7 @@ GI_PRODUCTS = {
 
 
 # ============================================================================
-# ФУНКЦИИ РАСЧЁТА (остальные)
+# ФУНКЦИИ РАСЧЁТА
 # ============================================================================
 def calculate_age(birth_date):
     today = date.today()
@@ -331,35 +479,29 @@ def calculate_water(weight, activity):
 
 
 def export_to_excel(email):
-    """Экспорт всей истории в Excel (включая замеры тела)"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Замеры веса
         df = pd.read_sql_query('''SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ',
             category as 'Категория', custom_calories as 'Калории' FROM measurements
             WHERE email=? ORDER BY date''', conn, params=(email,))
         if not df.empty: df.to_excel(writer, sheet_name='Замеры веса', index=False)
 
-        # Замеры тела
         df = pd.read_sql_query('''SELECT date as 'Дата', waist as 'Талия', hips as 'Бёдра',
             chest as 'Грудь', whr as 'WHR', whr_category as 'Категория WHR',
             body_fat as '% жира' FROM body_measurements
             WHERE email=? ORDER BY date''', conn, params=(email,))
         if not df.empty: df.to_excel(writer, sheet_name='Замеры тела', index=False)
 
-        # Тренировки
         df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
             sets as 'Подходы', reps as 'Повторения', weight_kg as 'Вес (кг)' FROM workouts
             WHERE email=? ORDER BY date''', conn, params=(email,))
         if not df.empty: df.to_excel(writer, sheet_name='Тренировки', index=False)
 
-        # Вода
         df = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День',
             SUM(volume_ml) as 'Выпито (мл)', MAX(goal_ml) as 'Норма (мл)' FROM water
             WHERE email=? GROUP BY SUBSTR(date, 1, 10) ORDER BY date''', conn, params=(email,))
         if not df.empty: df.to_excel(writer, sheet_name='Вода', index=False)
 
-        # Сон
         df = pd.read_sql_query('''SELECT date as 'Дата', hours as 'Часов',
             quality as 'Качество' FROM sleep
             WHERE email=? ORDER BY date''', conn, params=(email,))
@@ -370,7 +512,7 @@ def export_to_excel(email):
 
 
 # ============================================================================
-# ЭКРАН АВТОРИЗАЦИИ (упрощённый, без email-подтверждения)
+# ЭКРАН АВТОРИЗАЦИИ
 # ============================================================================
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -441,13 +583,66 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ============================================================================
-# ОСНОВНОЕ ПРИЛОЖЕНИЕ
+# ОСНОВНОЕ ПРИЛОЖЕНИЕ (после авторизации)
 # ============================================================================
 user_email = st.session_state.user_email
 user_data = st.session_state.user_data
 
 set_background(user_data.get('background', '🌌 Градиент (по умолчанию)'))
 
+# Запрос разрешений на уведомления
+if 'notification_requested' not in st.session_state:
+    request_notification_permission()
+    st.session_state.notification_requested = True
+
+# ============================================================================
+# 🔔 ПРОВЕРКА НАПОМИНАНИЙ
+# ============================================================================
+reminder_needed, days_passed = check_reminder_needed(user_email)
+
+if reminder_needed and not st.session_state.get('reminder_shown_today'):
+    play_reminder_sound()
+    show_notification(
+        "🏥 Health Platform 360°",
+        f"Прошло {days_passed} дней с последнего замера. Пора внести новые данные!"
+    )
+
+    st.markdown("""
+    <style>
+    .reminder-modal {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 30px;
+        border-radius: 20px;
+        color: white;
+        text-align: center;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        margin: 20px 0;
+    }
+    .reminder-modal h2 { color: white !important; margin: 0 0 15px 0; }
+    .reminder-modal p { font-size: 18px; margin: 10px 0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class='reminder-modal'>
+        <h2>⏰ Время позаботиться о себе!</h2>
+        <p>Прошло <b>{days_passed} дней</b> с последнего замера.</p>
+        <p>Регулярные измерения — ключ к успеху! 🎯</p>
+        <p style='font-size: 14px; opacity: 0.9;'>💡 Совет: взвешивайся утром натощак, после туалета, до еды и воды.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("✅ Понятно, взвешусь сегодня!", type="primary", use_container_width=True):
+        st.session_state.reminder_shown_today = True
+        st.success("🎉 Отлично! Ждём твои новые данные!")
+        st.balloons()
+        st.rerun()
+
+    st.markdown("---")
+
+# ============================================================================
+# БОКОВОЕ МЕНЮ
+# ============================================================================
 st.sidebar.markdown("## 🏥 Health Platform 360°")
 st.sidebar.markdown(f"### 👤 {user_data['name']} {user_data['surname']}")
 st.sidebar.caption(f"📧 {user_email}")
@@ -465,6 +660,39 @@ except:
 
 age = calculate_age(birth_date)
 gender = user_data['gender']
+
+# ============================================================================
+# 🎯 МОТИВАЦИОННЫЙ БЛОК В САЙДБАРЕ
+# ============================================================================
+progress_status = check_progress(user_email)
+
+if progress_status == 'goal_achieved':
+    quote = get_motivation_quote('goal_achieved')
+    quote_color, quote_bg = "#4CAF50", "#E8F5E9"
+elif progress_status == 'progress':
+    quote = get_motivation_quote('progress')
+    quote_color, quote_bg = "#2196F3", "#E3F2FD"
+elif progress_status == 'plateau':
+    quote = get_motivation_quote('plateau')
+    quote_color, quote_bg = "#FF9800", "#FFF3E0"
+else:
+    if st.session_state.get('first_visit_shown'):
+        quote = get_motivation_quote('daily_random')
+        quote_color, quote_bg = "#9C27B0", "#F3E5F5"
+    else:
+        quote = get_motivation_quote('first_visit')
+        quote_color, quote_bg = "#E91E63", "#FCE4EC"
+        st.session_state.first_visit_shown = True
+
+st.sidebar.markdown("---")
+st.sidebar.markdown(f"""
+<div style='background: {quote_bg}; padding: 15px; border-radius: 10px; 
+            border-left: 4px solid {quote_color}; margin: 10px 0;'>
+    <p style='color: {quote_color}; margin: 0; font-size: 14px; font-weight: 500;'>
+        {quote}
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # ============================================================================
 # 🏠 ГЛАВНАЯ
@@ -519,9 +747,10 @@ if section == "🏠 Главная":
                         ideal_weight, cal_m, cal_l))
         conn.commit()
         st.success("✅ Замер сохранён!")
+        st.balloons()
 
 # ============================================================================
-# 📏 🆕 ЗАМЕРЫ ТЕЛА (НОВЫЙ РАЗДЕЛ!)
+# 📏 ЗАМЕРЫ ТЕЛА
 # ============================================================================
 elif section == "📏 Замеры тела":
     st.markdown("<h1>📏 Замеры тела</h1>", unsafe_allow_html=True)
@@ -529,7 +758,7 @@ elif section == "📏 Замеры тела":
     **Зачем нужны замеры окружностей?**
     Вес на весах не показывает всю картину. Окружности помогают:
     - 🎯 Отличить потерю жира от потери мышц
-    - 📊 Рассчитать индекс WHR (талия/бёдра) — маркер сердечно-сосудистых рисков
+    - 📊 Рассчитать индекс WHR — маркер сердечно-сосудистых рисков
     - 💪 Оценить процент жира в организме
     """)
 
@@ -541,18 +770,17 @@ elif section == "📏 Замеры тела":
     c1, c2, c3 = st.columns(3)
     with c1:
         waist = st.number_input("🎯 Талия (см)", 40.0, 200.0, 75.0, 0.5,
-                                help="Измеряйте в самом узком месте, на уровне пупка")
+                                help="В самом узком месте, на уровне пупка", key="b_waist")
         hips = st.number_input("🍑 Бёдра (см)", 50.0, 200.0, 95.0, 0.5,
-                               help="Измеряйте в самом широком месте ягодиц")
+                               help="В самом широком месте ягодиц", key="b_hips")
         chest = st.number_input("👚 Грудь (см)", 50.0, 200.0, 90.0, 0.5,
-                                help="Измеряйте по самым выступающим точкам")
+                                help="По самым выступающим точкам", key="b_chest")
     with c2:
         neck = st.number_input("🦢 Шея (см)", 20.0, 60.0, 35.0, 0.5,
-                               help="Измеряйте под кадыком (для расчёта % жира)")
+                               help="Под кадыком", key="b_neck")
         arm = st.number_input("💪 Рука (см)", 15.0, 60.0, 28.0, 0.5,
-                              help="Измеряйте в самом широком месте бицепса")
+                              help="В самом широком месте бицепса", key="b_arm")
 
-    # Мгновенный расчёт при вводе
     if waist and hips:
         whr, whr_cat = calculate_whr(waist, hips, gender)
         waist_risk = calculate_waist_risk(waist, gender)
@@ -572,7 +800,6 @@ elif section == "📏 Замеры тела":
                 st.metric("🔥 % жира в организме", f"{bf}%")
                 st.caption(bf_cat)
 
-        # Рекомендации
         st.markdown("---")
         st.markdown("### 💡 Рекомендации по вашим замерам")
 
@@ -581,8 +808,8 @@ elif section == "📏 Замеры тела":
             🔴 **Высокий WHR** — повышенный риск сердечно-сосудистых заболеваний.
             **Что делать:**
             - Снизить потребление простых углеводов и сахара
-            - Увеличить аэробную нагрузку (ходьба, плавание) 150+ мин/нед
-            - Добавить силовые тренировки для улучшения композиции тела
+            - Увеличить аэробную нагрузку 150+ мин/нед
+            - Добавить силовые тренировки
             """)
         elif whr_cat and "Умеренный" in whr_cat:
             st.warning("🟡 Умеренный WHR — стоит обратить внимание на питание и активность.")
@@ -590,14 +817,12 @@ elif section == "📏 Замеры тела":
             st.success("🟢 WHR в норме — отличный показатель!")
 
         if waist_risk and "Высокий" in waist_risk:
-            st.error(
-                f"🔴 Окружность талии {waist} см говорит об абдоминальном ожирении. Висцеральный жир повышает риск диабета 2 типа и гипертонии.")
+            st.error(f"🔴 Окружность талии {waist} см говорит об абдоминальном ожирении.")
 
         if bf is not None:
-            if bf > 32 and gender == 'ж' or bf > 25 and gender == 'м':
-                st.warning(f"📊 Процент жира {bf}% выше среднего. Фокус на силовые тренировки + дефицит калорий.")
+            if (bf > 32 and gender == 'ж') or (bf > 25 and gender == 'м'):
+                st.warning(f"📊 Процент жира {bf}% выше среднего. Фокус на силовые + дефицит калорий.")
 
-    # Сохранение
     if st.button("💾 Сохранить замеры", type="primary"):
         if waist and hips:
             whr, whr_cat = calculate_whr(waist, hips, gender)
@@ -611,6 +836,7 @@ elif section == "📏 Замеры тела":
                             waist, hips, chest, neck, arm, whr, whr_cat, bf, bf_cat))
             conn.commit()
             st.success("✅ Замеры сохранены!")
+            st.balloons()
 
     st.markdown("---")
     st.markdown("### 📈 История замеров")
@@ -621,12 +847,9 @@ elif section == "📏 Замеры тела":
 
     if not df.empty:
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # График динамики
         chart_df = df[['Дата', 'Талия', 'Бёдра', 'Грудь']].set_index('Дата')
         st.markdown("**Динамика окружностей:**")
         st.line_chart(chart_df)
-
         if 'WHR' in df.columns:
             whr_chart = df[['Дата', 'WHR']].set_index('Дата')
             st.markdown("**Динамика WHR:**")
@@ -653,7 +876,7 @@ elif section == "🥗 Питание":
     custom_calories = st.number_input(
         "✏️ Моя целевая калорийность (ккал):",
         min_value=800, max_value=4000, value=cal_l, step=50,
-        help="Измените, если знаете особенности своего метаболизма"
+        help="Измените, если знаете особенности своего метаболизма", key="food_custom_cal"
     )
 
     if custom_calories < 1200:
@@ -762,6 +985,7 @@ elif section == "💪 Тренировки":
                                 exercise, sets, reps, weight_kg, notes))
                 conn.commit()
                 st.success(f"✅ Записано: {exercise} — {sets}x{reps}")
+                st.balloons()
 
     st.markdown("---")
     st.markdown("### 📖 История")
@@ -940,7 +1164,7 @@ elif section == "📊 История":
             st.info("Нет записей")
 
 # ============================================================================
-# ⚙️ НАСТРОЙКИ (упрощённые, без SMTP)
+# ⚙️ НАСТРОЙКИ
 # ============================================================================
 elif section == "⚙️ Настройки":
     st.markdown("<h1>⚙️ Настройки</h1>", unsafe_allow_html=True)
@@ -957,6 +1181,21 @@ elif section == "⚙️ Настройки":
         st.session_state.user_data['background'] = new_bg
         st.success("✅ Фон изменён!")
         st.rerun()
+
+    st.markdown("---")
+
+    # Мотивация
+    st.markdown("### 💪 Мотивация")
+    st.caption("Нажми кнопку, чтобы получить новую мотивирующую фразу!")
+
+    if st.button("🎲 Новая мотивирующая фраза"):
+        st.session_state.motivation_refresh = True
+        st.rerun()
+
+    if st.session_state.get('motivation_refresh'):
+        new_quote = get_motivation_quote('daily_random')
+        st.success(f"✨ {new_quote}")
+        st.session_state.motivation_refresh = False
 
     st.markdown("---")
 
