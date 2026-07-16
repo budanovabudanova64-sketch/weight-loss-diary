@@ -1,31 +1,54 @@
 # ============================================================================
-# 🏋️ ДНЕВНИК ПОХУДЕНИЯ PRO — С советами по питанию и ГИ
+# 🏥 HEALTH PLATFORM 360° — Комплексная платформа здоровья
 # ============================================================================
 
 import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime, timedelta, date
+import re
 
-st.set_page_config(page_title="Дневник похудения PRO", page_icon="🏋️", layout="centered")
+st.set_page_config(page_title="Health Platform 360°", page_icon="🏥", layout="wide")
 
 
 # ============================================================================
-# 1. БАЗА ДАННЫХ
+# 1. БАЗА ДАННЫХ (4 таблицы)
 # ============================================================================
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('diary_database_v2.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT, surname TEXT, name TEXT, birth_date TEXT,
-            gender TEXT, height REAL, weight REAL, target_weight REAL,
-            bmi REAL, category TEXT, ideal_weight REAL,
-            calories_maintain INT, calories_lose INT
-        )
-    ''')
+    conn = sqlite3.connect('health_platform_v3.db', check_same_thread=False)
+    c = conn.cursor()
+
+    # Таблица основных замеров
+    c.execute('''CREATE TABLE IF NOT EXISTS measurements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, surname TEXT, name TEXT, birth_date TEXT,
+        gender TEXT, height REAL, weight REAL, target_weight REAL,
+        activity TEXT, bmi REAL, category TEXT, ideal_weight REAL,
+        calories_maintain INT, calories_lose INT, protein REAL, fat REAL, carbs REAL
+    )''')
+
+    # Тренировочный дневник
+    c.execute('''CREATE TABLE IF NOT EXISTS workouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, surname TEXT, name TEXT, birth_date TEXT,
+        exercise TEXT, sets INT, reps INT, weight_kg REAL, notes TEXT
+    )''')
+
+    # Трекер воды
+    c.execute('''CREATE TABLE IF NOT EXISTS water (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, surname TEXT, name TEXT, birth_date TEXT,
+        glasses INT, volume_ml REAL, goal_ml REAL
+    )''')
+
+    # Трекер сна
+    c.execute('''CREATE TABLE IF NOT EXISTS sleep (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, surname TEXT, name TEXT, birth_date TEXT,
+        bedtime TEXT, wake_time TEXT, hours REAL, quality TEXT, notes TEXT
+    )''')
+
     conn.commit()
     return conn
 
@@ -33,7 +56,49 @@ def init_db():
 conn = init_db()
 
 # ============================================================================
-# 2. МАТЕМАТИЧЕСКИЕ ФУНКЦИИ
+# 2. МЕДИЦИНСКИЕ ДАННЫЕ (по возрастам и ВОЗ)
+# ============================================================================
+
+# Нормы БЖУ по возрастам (г на кг веса) — данные ВОЗ и Российских рекомендаций
+NUTRITION_BY_AGE = {
+    '18-29': {'protein': (1.0, 1.3), 'fat': (0.8, 1.0), 'carbs': (3.0, 4.0), 'fiber': 25},
+    '30-49': {'protein': (1.0, 1.2), 'fat': (0.8, 1.0), 'carbs': (3.0, 4.0), 'fiber': 25},
+    '50-64': {'protein': (1.0, 1.2), 'fat': (0.7, 0.9), 'carbs': (2.5, 3.5), 'fiber': 30},
+    '65+': {'protein': (1.2, 1.5), 'fat': (0.7, 0.9), 'carbs': (2.5, 3.5), 'fiber': 30},
+}
+
+# Рекомендации ВОЗ по физической нагрузке
+ACTIVITY_BY_AGE = {
+    '18-64': {
+        'aerobic': '150-300 мин умеренной ИЛИ 75-150 мин интенсивной в неделю',
+        'strength': 'Силовые тренировки 2+ раза в неделю на все группы мышц',
+        'examples': ['Ходьба быстрым шагом', 'Плавание', 'Велосипед', 'Танцы', 'Бег трусцой']
+    },
+    '65+': {
+        'aerobic': '150-300 мин умеренной активности в неделю',
+        'strength': 'Силовые 2+ раза в неделю + упражнения на БАЛАНС 3+ раза',
+        'examples': ['Скандинавская ходьба', 'Тай-чи', 'Йога', 'Плавание', 'Гимнастика']
+    }
+}
+
+# Нормы сна по возрастам (National Sleep Foundation)
+SLEEP_BY_AGE = {
+    '18-25': (7, 9, 'Оптимально 7-9 часов'),
+    '26-64': (7, 9, 'Оптимально 7-9 часов'),
+    '65+': (7, 8, 'Оптимально 7-8 часов'),
+}
+
+# Гликемический индекс (из прошлой версии)
+GI_PRODUCTS = {
+    'Низкий ГИ (≤55)': [('Гречка', 54), ('Овсянка', 55), ('Чечевица', 25), ('Яблоки', 38), ('Брокколи', 10),
+                        ('Миндаль', 15), ('Творог', 30)],
+    'Средний ГИ (56-69)': [('Рис басмати', 58), ('Цельнозерновой хлеб', 65), ('Бананы', 60), ('Свёкла варёная', 64)],
+    'Высокий ГИ (≥70)': [('Белый хлеб', 75), ('Белый рис', 83), ('Картофель фри', 75), ('Финики', 103), ('Пиво', 110),
+                         ('Сахар', 68)]
+}
+
+# ============================================================================
+# 3. ФУНКЦИИ РАСЧЁТА
 # ============================================================================
 AGE_NORMS = [(25, 19, 24), (35, 20, 25), (45, 21, 26), (55, 22, 27), (65, 23, 28)]
 AGE_FACTORS = [(30, 1.0), (40, 1.02), (50, 1.04), (60, 1.06), (float('inf'), 1.08)]
@@ -42,9 +107,25 @@ AGE_FACTORS = [(30, 1.0), (40, 1.02), (50, 1.04), (60, 1.06), (float('inf'), 1.0
 def calculate_age(birth_date):
     today = date.today()
     age = today.year - birth_date.year
-    if (today.month, today.day) < (birth_date.month, birth_date.day):
-        age -= 1
+    if (today.month, today.day) < (birth_date.month, birth_date.day): age -= 1
     return age
+
+
+def get_age_group(age):
+    if age < 30: return '18-29'
+    if age < 50: return '30-49'
+    if age < 65: return '50-64'
+    return '65+'
+
+
+def get_sleep_group(age):
+    if age < 26: return '18-25'
+    if age < 65: return '26-64'
+    return '65+'
+
+
+def get_activity_group(age):
+    return '65+' if age >= 65 else '18-64'
 
 
 def get_age_norm(age):
@@ -65,12 +146,12 @@ def calculate_ideal_weight(gender, height_inches, age_factor):
         'miller': (56.2, 53.1, 1.41, 1.36), 'hamwi': (48, 45.5, 2.7, 2.2)
     }
     results = []
-    for name, (m_base, f_base, m_mult, f_mult) in formulas.items():
-        base = m_base if gender == 'м' else f_base
-        mult = m_mult if gender == 'м' else f_mult
-        result = base + mult * (height_inches - 60)
-        if name == 'hamwi': result *= age_factor
-        results.append(result)
+    for name, (m_b, f_b, m_m, f_m) in formulas.items():
+        b = m_b if gender == 'м' else f_b
+        m = m_m if gender == 'м' else f_m
+        r = b + m * (height_inches - 60)
+        if name == 'hamwi': r *= age_factor
+        results.append(r)
     return sum(results) / len(results)
 
 
@@ -79,362 +160,403 @@ def calculate_calories(gender, weight, height_cm, age, activity):
         bmr = 10 * weight + 6.25 * height_cm - 5 * age + 5
     else:
         bmr = 10 * weight + 6.25 * height_cm - 5 * age - 161
-    multipliers = {'Сидячий': 1.2, 'Умеренный': 1.375, 'Активный': 1.55}
-    maintain = int(bmr * multipliers[activity])
-    lose = maintain - 500
-    return maintain, max(lose, 1200)
+    mult = {'Сидячий': 1.2, 'Умеренный': 1.375, 'Активный': 1.55, 'Очень активный': 1.725}
+    maintain = int(bmr * mult[activity])
+    return maintain, max(maintain - 500, 1200)
+
+
+def calculate_water(weight, activity):
+    """Расчёт нормы воды: 30 мл/кг + поправка на активность"""
+    base = weight * 30
+    bonus = {'Сидячий': 0, 'Умеренный': 500, 'Активный': 1000, 'Очень активный': 1500}
+    return int(base + bonus[activity])
 
 
 # ============================================================================
-# 3. СОВЕТЫ ПО ПИТАНИЮ (НОВЫЙ БЛОК)
+# 4. БОКОВОЕ МЕНЮ НАВИГАЦИИ
 # ============================================================================
-
-# Таблица гликемического индекса продуктов (по данным Международных таблиц ГИ)
-GI_PRODUCTS = {
-    'Низкий ГИ (≤55)': [
-        ('Гречка', 54), ('Овсянка (долгой варки)', 55), ('Перловка', 22),
-        ('Чечевица', 25), ('Фасоль', 30), ('Нут', 28),
-        ('Яблоки', 38), ('Груши', 38), ('Апельсины', 42),
-        ('Грейпфрут', 25), ('Вишня', 22), ('Клубника', 41),
-        ('Брокколи', 10), ('Цветная капуста', 15), ('Огурцы', 15),
-        ('Помидоры', 30), ('Шпинат', 15), ('Морковь (сырая)', 16),
-        ('Миндаль', 15), ('Грецкие орехи', 15), ('Арахис', 14),
-        ('Молоко 2.5%', 27), ('Йогурт натуральный', 33), ('Творог', 30),
-    ],
-    'Средний ГИ (56-69)': [
-        ('Рис басмати', 58), ('Бурый рис', 68), ('Гречневые хлебцы', 68),
-        ('Цельнозерновой хлеб', 65), ('Ржаной хлеб', 65),
-        ('Бананы', 60), ('Киви', 58), ('Ананас', 59),
-        ('Изюм', 64), ('Свёкла (варёная)', 64),
-        ('Овсяное печенье', 55), ('Макароны из твёрдых сортов', 55),
-    ],
-    'Высокий ГИ (≥70)': [
-        ('Белый хлеб', 75), ('Белый рис', 83), ('Картофельное пюре', 90),
-        ('Жареный картофель', 75), ('Картофель фри', 75),
-        ('Кукурузные хлопья', 85), ('Мюсли с сахаром', 80),
-        ('Арбуз', 72), ('Ананас консервированный', 73),
-        ('Финики', 103), ('Пиво', 110),
-        ('Шоколад молочный', 70), ('Мёд', 61), ('Сахар', 68),
-        ('Сладкие газировки', 85), ('Выпечка из белой муки', 75),
-    ]
-}
-
-
-def get_nutrition_advice(category, goal):
-    """Возвращает советы по питанию в зависимости от категории и цели"""
-
-    if goal == 'lose':  # Похудение
-        return {
-            'title': '📉 ПИТАНИЕ ДЛЯ ПОХУДЕНИЯ',
-            'color': '#4CAF50',
-            'principles': [
-                '🔥 Дефицит 400-500 ккал в день (не больше!)',
-                '💧 Пей 30 мл воды на 1 кг веса (например, 2 л при весе 65 кг)',
-                '🥩 Белок в каждом приёме пищи (1.2-1.6 г на кг веса)',
-                '🥦 Половина тарелки — овощи и зелень',
-                '⏰ Последний приём пищи за 3 часа до сна',
-                '🚫 Исключи жидкие калории: соки, газировки, латте с сиропом',
-            ],
-            'to_add': [
-                '🥬 Листовая зелень (шпинат, салат, руккола) — почти 0 ккал',
-                '🐟 Белая рыба (треска, минтай) — 80 ккал/100г',
-                '🍗 Куриная грудка без кожи — 110 ккал/100г',
-                '🥚 Яйца — сытость на 4+ часа',
-                '🥒 Огурцы, помидоры, кабачки — объём без калорий',
-                '🫐 Ягоды (особенно клубника, черника) — низкий ГИ',
-                '🥜 Орехи (миндаль, грецкие) — 15-20 г в день',
-            ],
-            'to_remove': [
-                '🍞 Белый хлеб, булки, сдоба (ГИ 75+)',
-                '🍟 Жареный картофель, фри (ГИ 75-90)',
-                '🍬 Сладости, шоколад, печенье (ГИ 70+)',
-                '🥤 Сладкие газировки и соки (ГИ 85+)',
-                '🍺 Алкоголь — особенно пиво (ГИ 110!)',
-                '🍝 Макароны из мягких сортов пшеницы',
-                '🥐 Фастфуд, полуфабрикаты, колбасы',
-            ],
-            'menu_example': """
-            **Завтрак:** Овсянка на воде + ягоды + 5 миндальных орехов (350 ккал)  
-            **Перекус:** Яблоко + 20 г творога (150 ккал)  
-            **Обед:** Куриная грудка + гречка + салат из свежих овощей (450 ккал)  
-            **Полдник:** Натуральный йогурт + 10 г орехов (180 ккал)  
-            **Ужин:** Белая рыба + тушёные овощи (350 ккал)
-            """
-        }
-
-    elif goal == 'gain':  # Набор веса
-        return {
-            'title': '📈 ПИТАНИЕ ДЛЯ НАБОРА ВЕСА',
-            'color': '#2196F3',
-            'principles': [
-                '🔥 Профицит 300-500 ккал в день',
-                '🍽️ 5-6 приёмов пищи в день (небольшие порции)',
-                '🥩 Увеличь белок до 1.6-2 г на кг веса',
-                '🥑 Добавь полезные жиры (авокадо, орехи, оливковое масло)',
-                '💪 Ешь углеводы с низким ГИ для энергии',
-                '🏋️ Сочетай с силовыми тренировками (иначе пойдёт жир)',
-            ],
-            'to_add': [
-                '🥑 Авокадо — 160 ккал/100г, полезные жиры',
-                '🥜 Орехи и ореховая паста — 600 ккал/100г',
-                '🍌 Бананы — быстрые углеводы после тренировки',
-                '🥛 Цельное молоко, жирный творог (5-9%)',
-                '🍗 Красное мясо (говядина) — железо и белок',
-                '🐟 Жирная рыба (лосось, скумбрия) — омега-3',
-                '🍚 Бурый рис, киноа, гречка — сложные углеводы',
-                '🫒 Оливковое масло — добавляй в салаты',
-            ],
-            'to_remove': [
-                '🍭 Пустые калории: сладости, фастфуд (набор жира, а не мышц)',
-                '🥤 Газировки и энергетики',
-                '🍟 Жареное в большом количестве масла',
-                '🍺 Алкоголь — тормозит синтез белка',
-                '🥡 Пропуск приёмов пищи',
-            ],
-            'menu_example': """
-            **Завтрак:** Овсянка на молоке + банан + арахисовая паста (550 ккал)  
-            **Перекус:** Творог 5% + орехи + мёд (350 ккал)  
-            **Обед:** Говядина + бурый рис + овощи + оливковое масло (650 ккал)  
-            **Полдник:** Сэндвич из цельнозернового хлеба с курицей и авокадо (450 ккал)  
-            **Ужин:** Лосось + киноа + салат (550 ккал)  
-            **Перед сном:** Стакан молока + 20 г миндаля (250 ккал)
-            """
-        }
-
-    else:  # Поддержание
-        return {
-            'title': '⚖️ ПИТАНИЕ ДЛЯ ПОДДЕРЖАНИЯ ВЕСА',
-            'color': '#FF9800',
-            'principles': [
-                '🔥 Держи калорийность на уровне своего расхода',
-                '🥗 Правило тарелки: ½ овощи, ¼ белок, ¼ сложные углеводы',
-                '💧 30 мл воды на 1 кг веса',
-                '🍽️ 3 основных приёма пищи + 1-2 перекуса',
-                '⏰ Старайся есть в одно и то же время',
-                '😴 Сон 7-8 часов — критичен для метаболизма',
-            ],
-            'to_add': [
-                '🥦 Разноцветные овощи — 5 порций в день',
-                '🐟 Рыба 2-3 раза в неделю',
-                '🥜 Орехи и семена (льняные, чиа)',
-                '🫘 Бобовые (чечевица, фасоль) — 3-4 раза в неделю',
-                '🥛 Кисломолочные продукты — для микрофлоры',
-                '🍓 Сезонные ягоды и фрукты',
-                '🫒 Нерафинированные масла (оливковое, льняное)',
-            ],
-            'to_remove': [
-                '🍬 Избыток сахара (не более 25 г в день по ВОЗ)',
-                '🧂 Избыток соли (не более 5 г в день)',
-                '🍟 Трансжиры (маргарин, фастфуд, магазинная выпечка)',
-                '🥤 Сладкие напитки',
-                '🍺 Алкоголь — не более 1-2 раз в неделю',
-                '🥡 Переработанное мясо (сосиски, колбасы)',
-            ],
-            'menu_example': """
-            **Завтрак:** Омлет из 2 яиц + цельнозерновой тост + авокадо (450 ккал)  
-            **Перекус:** Фрукт + горсть орехов (200 ккал)  
-            **Обед:** Суп-пюре из овощей + куриная грудка + салат (500 ккал)  
-            **Полдник:** Натуральный йогурт + ягоды (180 ккал)  
-            **Ужин:** Запечённая рыба + овощи на пару + киноа (450 ккал)
-            """
-        }
-
+st.sidebar.markdown("## 🏥 Health Platform 360°")
+st.sidebar.markdown("---")
+section = st.sidebar.radio("📋 Раздел", [
+    "🏠 Главная",
+    "🥗 Питание",
+    "💪 Тренировки",
+    "💧 Вода",
+    "😴 Сон",
+    "📊 История"
+])
 
 # ============================================================================
-# 4. ИНТЕРФЕЙС
+# 5. ОБЩИЙ БЛОК ПРОФИЛЯ (используется везде)
 # ============================================================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 👤 Твой профиль")
+with st.sidebar:
+    surname = st.text_input("Фамилия", placeholder="Иванов").strip().capitalize()
+    name = st.text_input("Имя", placeholder="Иван").strip().capitalize()
+    birth_date = st.date_input("Дата рождения", value=date(1990, 1, 1),
+                               min_value=date(1920, 1, 1), max_value=date.today())
+    gender = st.radio("Пол", ["м", "ж"], horizontal=True)
+    height_cm = st.number_input("Рост (см)", 100.0, 250.0, 170.0, 0.1)
+    weight = st.number_input("Текущий вес (кг)", 30.0, 300.0, 70.0, 0.1)
+    target_weight = st.number_input("Целевой вес (кг)", 30.0, 300.0, 65.0, 0.1)
+    activity = st.selectbox("Активность", ["Сидячий", "Умеренный", "Активный", "Очень активный"])
 
-st.warning(
-    "⚠️ **Внимание:** Данное приложение носит исключительно информационный и учебный характер. Расчеты являются приблизительными и не заменяют консультацию врача-диетолога или эндокринолога.")
+# ============================================================================
+# 6. РАЗДЕЛ: 🏠 ГЛАВНАЯ
+# ============================================================================
+if section == "🏠 Главная":
+    st.warning("⚠️ **Внимание:** Приложение носит информационный характер и не заменяет консультацию врача.")
+    st.markdown("<h1 style='text-align:center;'>🏥 HEALTH PLATFORM 360°</h1>", unsafe_allow_html=True)
+    st.markdown("### Твой персональный помощник для комплексного управления здоровьем")
 
-st.markdown("<h1 style='text-align: center; color: #2c5f8d;'>🏋️ ДНЕВНИК ПОХУДЕНИЯ PRO</h1>", unsafe_allow_html=True)
-st.markdown("---")
-
-# ВВОД ДАННЫХ
-st.subheader("📝 Твои данные")
-col1, col2 = st.columns(2)
-
-with col1:
-    surname = st.text_input("👤 Фамилия", placeholder="Иванов").strip().capitalize()
-    name = st.text_input("👤 Имя", placeholder="Иван").strip().capitalize()
-    birth_date = st.date_input("🎂 Дата рождения", value=date(1990, 1, 1), min_value=date(1920, 1, 1),
-                               max_value=date.today())
-    gender = st.radio("⚧ Пол", ["м", "ж"], horizontal=True)
-
-with col2:
-    height_cm = st.number_input("📏 Рост (см)", min_value=100.0, max_value=250.0, value=170.0, step=0.1)
-    weight = st.number_input("⚖️ Текущий вес (кг)", min_value=30.0, max_value=300.0, value=70.0, step=0.1)
-    target_weight = st.number_input("🎯 Целевой вес (кг)", min_value=30.0, max_value=300.0, value=65.0, step=0.1)
-    activity = st.selectbox("🏃 Уровень активности", ["Сидячий", "Умеренный", "Активный"])
-
-# КНОПКА РАСЧЕТА
-if st.button("🔢 РАССЧИТАТЬ И СОХРАНИТЬ", type="primary", use_container_width=True):
-    if not surname or not name:
-        st.error("❌ Пожалуйста, введите фамилию и имя!")
-    else:
+    if surname and name:
         age = calculate_age(birth_date)
+        st.info(f"👋 Привет, **{name}**! Тебе **{age} лет**. Выбери раздел слева для работы.")
 
+        # Быстрые расчёты
         height_m = height_cm / 100
-        height_inches = height_cm / 2.54
         bmi = round(weight / (height_m ** 2), 1)
-
         norm_min, norm_max = get_age_norm(age)
-        age_factor = get_age_factor(age)
+        cal_m, cal_l = calculate_calories(gender, weight, height_cm, age, activity)
+        water_ml = calculate_water(weight, activity)
+        sleep_min, sleep_max, sleep_text = SLEEP_BY_AGE[get_sleep_group(age)]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📊 ИМТ", bmi)
+        c2.metric("🔥 Калории", f"{cal_l} ккал")
+        c3.metric("💧 Вода", f"{water_ml} мл")
+        c4.metric("😴 Сон", f"{sleep_min}-{sleep_max} ч")
 
         if bmi < norm_min:
-            category, cat_color = "Недостаточный вес", "#2196F3"
+            cat = "Недостаточный вес"
         elif bmi <= norm_max:
-            category, cat_color = "Норма", "#4CAF50"
+            cat = "Норма"
         elif bmi < 30:
-            category, cat_color = "Избыточный вес", "#FF9800"
+            cat = "Избыточный вес"
         else:
-            category, cat_color = "Ожирение", "#F44336"
+            cat = "Ожирение"
+        st.success(f"📋 Твоя категория: **{cat}**")
+    else:
+        st.warning("⬅️ Заполни профиль в боковом меню слева")
 
-        ideal_weight = round(calculate_ideal_weight(gender, height_inches, age_factor), 1)
-        calories_maintain, calories_lose = calculate_calories(gender, weight, height_cm, age, activity)
+# ============================================================================
+# 7. РАЗДЕЛ: 🥗 ПИТАНИЕ (УГЛУБЛЁННОЕ)
+# ============================================================================
+elif section == "🥗 Питание":
+    st.markdown("<h1>🥗 Персональное питание</h1>", unsafe_allow_html=True)
 
-        # Определяем цель
-        diff = weight - target_weight
-        if diff > 2:
-            goal = 'lose'
-            months = round(diff / 3, 1)
-            target_date = datetime.now() + timedelta(days=int(months * 30))
-            goal_text = f"Осталось: **{round(diff, 1)} кг**. При темпе 3 кг/мес. цель будет достигнута примерно к **{target_date.strftime('%B %Y')}** ({months} мес.)."
-        elif diff < -2:
-            goal = 'gain'
-            months = round(abs(diff) / 2, 1)
-            target_date = datetime.now() + timedelta(days=int(months * 30))
-            goal_text = f"Нужно набрать: **{round(abs(diff), 1)} кг**. При темпе 2 кг/мес. цель будет достигнута примерно к **{target_date.strftime('%B %Y')}** ({months} мес.)."
-        else:
-            goal = 'maintain'
-            goal_text = "🎉 Твой вес близок к цели! Задача — поддержание."
+    if not (surname and name):
+        st.warning("⬅️ Заполни профиль слева")
+    else:
+        age = calculate_age(birth_date)
+        age_group = get_age_group(age)
+        cal_m, cal_l = calculate_calories(gender, weight, height_cm, age, activity)
+        norms = NUTRITION_BY_AGE[age_group]
 
-        # СОХРАНЕНИЕ В БАЗУ
-        current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO history (date, surname, name, birth_date, gender, height, weight, target_weight, bmi, category, ideal_weight, calories_maintain, calories_lose)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (current_date, surname, name, birth_date.strftime("%d.%m.%Y"), gender, height_cm, weight, target_weight,
-              bmi, category, ideal_weight, calories_maintain, calories_lose))
-        conn.commit()
+        # Расчёт БЖУ
+        protein_min = round(weight * norms['protein'][0], 1)
+        protein_max = round(weight * norms['protein'][1], 1)
+        fat_min = round(weight * norms['fat'][0], 1)
+        fat_max = round(weight * norms['fat'][1], 1)
+        carbs_min = round(weight * norms['carbs'][0], 1)
+        carbs_max = round(weight * norms['carbs'][1], 1)
 
-        st.success("✅ Данные рассчитаны и сохранены!")
+        st.markdown(f"### 📊 Твоя норма калорий и БЖУ (возрастная группа: **{age_group}**)")
 
-        # РЕЗУЛЬТАТЫ
-        st.markdown("---")
-        st.subheader("📊 Твои результаты")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🔥 Калории", f"{cal_l} ккал", "для похудения")
+        c2.metric("🥩 Белки", f"{protein_min}-{protein_max} г")
+        c3.metric("🥑 Жиры", f"{fat_min}-{fat_max} г")
+        c4.metric("🍞 Углеводы", f"{carbs_min}-{carbs_max} г")
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("📊 ИМТ", bmi)
-        m2.metric("⚖️ Идеальный вес", f"{ideal_weight} кг")
-        m3.metric("🔥 Поддержание", f"{calories_maintain} ккал")
-        m4.metric("📉 Похудение", f"{calories_lose} ккал")
-
-        st.markdown(f"""
-        <div style='background: {cat_color}22; padding: 15px; border-radius: 10px; border-left: 5px solid {cat_color};'>
-            <h3 style='margin: 0; color: {cat_color};'>📋 {category}</h3>
-            <p style='margin: 5px 0;'>Норма ИМТ для {age} лет: <b>{norm_min} – {norm_max}</b></p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.info(f"🎯 **План действий:** {goal_text}")
-
-        # ====================================================================
-        # 🥗 БЛОК СОВЕТОВ ПО ПИТАНИЮ (НОВОЕ!)
-        # ====================================================================
-        st.markdown("---")
-        st.markdown("<h2 style='text-align: center;'>🥗 ПЕРСОНАЛЬНЫЕ СОВЕТЫ ПО ПИТАНИЮ</h2>", unsafe_allow_html=True)
-
-        advice = get_nutrition_advice(category, goal)
-
-        # Заголовок с цветом
-        st.markdown(f"""
-        <div style='background: {advice['color']}22; padding: 15px; border-radius: 10px; border-left: 5px solid {advice['color']};'>
-            <h3 style='margin: 0; color: {advice['color']};'>{advice['title']}</h3>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Вкладки для удобной навигации
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📋 Принципы", "✅ Что добавить", "❌ Что исключить",
-            "📊 Таблица ГИ", "🍽️ Пример меню"
-        ])
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 Принципы", "✅ Что есть", "❌ Что исключить", "📊 Таблица ГИ"])
 
         with tab1:
-            st.markdown("### 🎯 Основные принципы твоего питания:")
-            for principle in advice['principles']:
-                st.markdown(f"- {principle}")
+            st.markdown(f"### 🎯 Возрастные особенности ({age_group} лет)")
+            if age_group == '18-29':
+                st.info("🔥 Метаболизм на пике. Важно сформировать здоровые привычки на всю жизнь.")
+            elif age_group == '30-49':
+                st.info("⚠️ Метаболизм начинает замедляться. Увеличь долю белка, следи за сахаром.")
+            elif age_group == '50-64':
+                st.info("🦴 Важно: кальций, витамин D, омега-3. Снизь соль и насыщенные жиры.")
+            else:
+                st.info("👴 Нужно БОЛЬШЕ белка (1.2-1.5 г/кг) для сохранения мышц. Кальций и B12 критичны.")
+
+            st.markdown(f"""
+            **Общие принципы твоего возраста:**
+            - 💧 Вода: **{calculate_water(weight, activity)} мл** в день
+            - 🥦 Клетчатка: **{norms['fiber']} г** в день (овощи, цельные злаки)
+            - 🧂 Соль: не более **5 г** в день (ВОЗ)
+            - 🍬 Сахар: не более **25 г** добавленного сахара в день (ВОЗ)
+            - 🍽️ Режим: 3 основных приёма + 1-2 перекуса
+            """)
 
         with tab2:
-            st.markdown("### ✅ Продукты, которые стоит добавить в рацион:")
-            for product in advice['to_add']:
-                st.markdown(f"- {product}")
+            st.markdown("### ✅ Рекомендуемые продукты")
+            foods = {
+                'Белки': ['🐟 Рыба 2-3 раза/нед', '🍗 Куриная грудка', '🥚 Яйца', '🫘 Бобовые', '🥛 Творог'],
+                'Углеводы': ['🌾 Гречка', '🍚 Бурый рис', '🥔 Батат', '🍞 Цельнозерновой хлеб'],
+                'Жиры': ['🥑 Авокадо', '🫒 Оливковое масло', '🥜 Орехи 30г/день', '🐟 Жирная рыба'],
+                'Овощи/Фрукты': ['🥬 5 порций в день', '🫐 Ягоды', '🍎 Сезонные фрукты']
+            }
+            cols = st.columns(4)
+            for i, (cat, items) in enumerate(foods.items()):
+                with cols[i]:
+                    st.markdown(f"**{cat}**")
+                    for item in items:
+                        st.markdown(f"- {item}")
 
         with tab3:
-            st.markdown("### ❌ Продукты, которые стоит исключить или ограничить:")
-            for product in advice['to_remove']:
-                st.markdown(f"- {product}")
+            st.markdown("### ❌ Что исключить или минимизировать")
+            st.markdown("""
+            - 🍞 **Белый хлеб, выпечка** (ГИ 75+) → замени на цельнозерновой
+            - 🍟 **Жареное, фастфуд** → готовь на пару, запекай
+            - 🍬 **Сладости, газировки** → фрукты, ягоды, вода
+            - 🥓 **Переработанное мясо** (сосиски, колбаса) → свежее мясо, рыба
+            - 🍺 **Алкоголь** — пустые калории + вред для сна
+            - 🧂 **Избыток соли** — провоцирует отёки и гипертонию
+            """)
 
         with tab4:
-            st.markdown("### 📊 Гликемический индекс (ГИ) продуктов")
-            st.caption(
-                "ГИ показывает, как быстро продукт повышает сахар в крови. Для похудения выбирай продукты с низким ГИ.")
-
-            # Зелёная зона
-            st.markdown("#### 🟢 Низкий ГИ (≤55) — **МОЖНО И НУЖНО**")
-            df_low = pd.DataFrame(GI_PRODUCTS['Низкий ГИ (≤55)'], columns=['Продукт', 'ГИ'])
-            st.dataframe(df_low, use_container_width=True, hide_index=True)
-
-            # Жёлтая зона
-            st.markdown("#### 🟡 Средний ГИ (56-69) — **УМЕРЕННО**")
-            df_mid = pd.DataFrame(GI_PRODUCTS['Средний ГИ (56-69)'], columns=['Продукт', 'ГИ'])
-            st.dataframe(df_mid, use_container_width=True, hide_index=True)
-
-            # Красная зона
-            st.markdown("#### 🔴 Высокий ГИ (≥70) — **ИСКЛЮЧИТЬ ИЛИ МИНИМИЗИРОВАТЬ**")
-            df_high = pd.DataFrame(GI_PRODUCTS['Высокий ГИ (≥70)'], columns=['Продукт', 'ГИ'])
-            st.dataframe(df_high, use_container_width=True, hide_index=True)
-
-        with tab5:
-            st.markdown("### 🍽️ Примерное меню на день:")
-            st.markdown(advice['menu_example'])
-
-        # Дисклеймер по питанию
-        st.caption(
-            "⚠️ Рекомендации носят общий характер. При наличии заболеваний ЖКТ, диабета, аллергии или беременности проконсультируйтесь с врачом.")
+            st.markdown("### 📊 Гликемический индекс продуктов")
+            for level, products in GI_PRODUCTS.items():
+                st.markdown(f"#### {level}")
+                df = pd.DataFrame(products, columns=['Продукт', 'ГИ'])
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
 # ============================================================================
-# 5. ЛИЧНЫЙ КАБИНЕТ
+# 8. РАЗДЕЛ: 💪 ТРЕНИРОВКИ
 # ============================================================================
-st.markdown("---")
-st.subheader("📖 Личный кабинет")
+elif section == "💪 Тренировки":
+    st.markdown("<h1>💪 Тренировочный дневник</h1>", unsafe_allow_html=True)
 
-search_col1, search_col2, search_col3 = st.columns(3)
-with search_col1:
-    search_surname = st.text_input("Фамилия:", value=surname if 'surname' in locals() else "").strip().capitalize()
-with search_col2:
-    search_name = st.text_input("Имя:", value=name if 'name' in locals() else "").strip().capitalize()
-with search_col3:
-    search_birth = st.date_input("Дата рождения:", value=birth_date if 'birth_date' in locals() else date(1990, 1, 1))
-
-if st.button("🔍 Найти мои записи"):
-    birth_str = search_birth.strftime("%d.%m.%Y")
-    df = pd.read_sql_query('''
-        SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ', category as 'Категория', 
-               calories_lose as 'Ккал для похудения', target_weight as 'Цель'
-        FROM history 
-        WHERE surname = ? AND name = ? AND birth_date = ?
-        ORDER BY date DESC
-    ''', conn, params=(search_surname, search_name, birth_str))
-
-    if not df.empty:
-        st.success(f"✅ Найдено записей: {len(df)}")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        if len(df) >= 2:
-            st.markdown("📈 **Динамика твоего веса**")
-            chart_data = df[['Дата', 'Вес']].set_index('Дата')
-            st.line_chart(chart_data)
+    if not (surname and name):
+        st.warning("⬅️ Заполни профиль слева")
     else:
-        st.info(f"Записей для {search_surname} {search_name} ({birth_str}) пока нет.")
+        age = calculate_age(birth_date)
+        act_group = get_activity_group(age)
+        rec = ACTIVITY_BY_AGE[act_group]
+
+        st.markdown(f"### 📋 Рекомендации ВОЗ для возраста **{age} лет** ({act_group})")
+        st.info(f"""
+        🏃 **Аэробная нагрузка:** {rec['aerobic']}  
+        🏋️ **Силовая:** {rec['strength']}
+        """)
+        st.markdown("**Примеры активности:** " + ", ".join(rec['examples']))
+
+        st.markdown("---")
+        st.markdown("### 📝 Записать тренировку")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            exercise = st.text_input("Упражнение", placeholder="Приседания")
+            sets = st.number_input("Подходы", 1, 20, 3)
+        with c2:
+            reps = st.number_input("Повторения", 1, 100, 12)
+            weight_kg = st.number_input("Вес (кг)", 0.0, 500.0, 0.0, 0.5)
+        with c3:
+            notes = st.text_input("Заметки (опционально)")
+            if st.button("💾 Сохранить тренировку", type="primary", use_container_width=True):
+                if exercise:
+                    cursor = conn.cursor()
+                    cursor.execute('''INSERT INTO workouts 
+                        (date, surname, name, birth_date, exercise, sets, reps, weight_kg, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                   (datetime.now().strftime("%d.%m.%Y %H:%M"), surname, name,
+                                    birth_date.strftime("%d.%m.%Y"), exercise, sets, reps, weight_kg, notes))
+                    conn.commit()
+                    st.success(f"✅ Записано: {exercise} — {sets}x{reps}")
+
+        st.markdown("---")
+        st.markdown("### 📖 История твоих тренировок")
+        df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
+            sets as 'Подходы', reps as 'Повторения', weight_kg as 'Вес (кг)', notes as 'Заметки'
+            FROM workouts WHERE surname=? AND name=? AND birth_date=?
+            ORDER BY date DESC LIMIT 20''', conn,
+                               params=(surname, name, birth_date.strftime("%d.%m.%Y")))
+
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Пока нет записей. Начни свою первую тренировку!")
+
+# ============================================================================
+# 9. РАЗДЕЛ: 💧 ВОДА
+# ============================================================================
+elif section == "💧 Вода":
+    st.markdown("<h1>💧 Водный баланс</h1>", unsafe_allow_html=True)
+
+    if not (surname and name):
+        st.warning("⬅️ Заполни профиль слева")
+    else:
+        daily_goal = calculate_water(weight, activity)
+        glasses_ml = 250  # объём одного стакана
+
+        st.markdown(f"### 🎯 Твоя дневная норма: **{daily_goal} мл** ({round(daily_goal / glasses_ml, 1)} стаканов)")
+        st.caption("Расчёт: 30 мл на кг веса + поправка на активность")
+
+        # Прогресс-бар
+        today = datetime.now().strftime("%d.%m.%Y")
+        df_today = pd.read_sql_query('''SELECT SUM(volume_ml) as total FROM water
+            WHERE surname=? AND name=? AND birth_date=? AND date LIKE ?''', conn,
+                                     params=(surname, name, birth_date.strftime("%d.%m.%Y"), f"{today}%"))
+        drunk = int(df_today['total'].iloc[0] or 0)
+
+        progress = min(drunk / daily_goal, 1.0)
+        st.progress(progress, text=f"Выпито сегодня: {drunk} мл из {daily_goal} мл ({int(progress * 100)}%)")
+
+        if progress >= 1.0:
+            st.success("🎉 Дневная норма выполнена! Отличная работа!")
+        elif progress >= 0.7:
+            st.info("💪 Осталось немного. Продолжай!")
+
+        st.markdown("---")
+        st.markdown("### 🥤 Добавить стакан воды")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            glasses = st.number_input("Стаканов", 1, 20, 1)
+        with c2:
+            vol = st.number_input("Объём (мл)", 100, 1000, 250, 50)
+        with c3:
+            if st.button("💧 Выпить", type="primary", use_container_width=True):
+                cursor = conn.cursor()
+                cursor.execute('''INSERT INTO water (date, surname, name, birth_date, glasses, volume_ml, goal_ml)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                               (datetime.now().strftime("%d.%m.%Y %H:%M"), surname, name,
+                                birth_date.strftime("%d.%m.%Y"), glasses, glasses * vol, daily_goal))
+                conn.commit()
+                st.success(f"✅ Записано: {glasses * vol} мл")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📊 История по дням")
+        df_hist = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День', 
+            SUM(volume_ml) as 'Выпито (мл)', MAX(goal_ml) as 'Норма (мл)'
+            FROM water WHERE surname=? AND name=? AND birth_date=?
+            GROUP BY SUBSTR(date, 1, 10) ORDER BY date DESC LIMIT 14''', conn,
+                                    params=(surname, name, birth_date.strftime("%d.%m.%Y")))
+        if not df_hist.empty:
+            st.dataframe(df_hist, use_container_width=True, hide_index=True)
+            chart = df_hist.set_index('День')
+            st.line_chart(chart)
+
+# ============================================================================
+# 10. РАЗДЕЛ: 😴 СОН
+# ============================================================================
+elif section == "😴 Сон":
+    st.markdown("<h1>😴 Трекер сна</h1>", unsafe_allow_html=True)
+
+    if not (surname and name):
+        st.warning("⬅️ Заполни профиль слева")
+    else:
+        age = calculate_age(birth_date)
+        sl_group = get_sleep_group(age)
+        sl_min, sl_max, sl_text = SLEEP_BY_AGE[sl_group]
+
+        st.markdown(f"### 🎯 Твоя норма сна: **{sl_min}-{sl_max} часов** ({sl_text})")
+
+        st.markdown("---")
+        st.markdown("### 📝 Записать сон")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            bedtime = st.time_input("Во сколько лёг", value=None)
+        with c2:
+            wake_time = st.time_input("Во сколько встал", value=None)
+        with c3:
+            quality = st.selectbox("Качество сна", ["Отличное 😴", "Хорошее 🙂", "Нормальное 😐", "Плохое 😫"])
+        notes = st.text_input("Заметки (кофе поздно, стресс и т.д.)")
+
+        if st.button("💾 Сохранить сон", type="primary"):
+            if bedtime and wake_time:
+                # Расчёт часов
+                bed_dt = datetime.combine(date.today(), bedtime)
+                wake_dt = datetime.combine(date.today(), wake_time)
+                if wake_dt <= bed_dt:
+                    wake_dt += timedelta(days=1)
+                hours = round((wake_dt - bed_dt).total_seconds() / 3600, 1)
+
+                cursor = conn.cursor()
+                cursor.execute('''INSERT INTO sleep 
+                    (date, surname, name, birth_date, bedtime, wake_time, hours, quality, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                               (datetime.now().strftime("%d.%m.%Y %H:%M"), surname, name,
+                                birth_date.strftime("%d.%m.%Y"), bedtime.strftime("%H:%M"),
+                                wake_time.strftime("%H:%M"), hours, quality, notes))
+                conn.commit()
+
+                if sl_min <= hours <= sl_max:
+                    st.success(f"✅ Отлично! Ты спал(а) **{hours} ч** — это в норме!")
+                elif hours < sl_min:
+                    st.warning(f"⚠️ Ты спал(а) **{hours} ч** — меньше нормы ({sl_min} ч)")
+                else:
+                    st.info(f"💤 Ты спал(а) **{hours} ч** — больше нормы")
+
+        st.markdown("---")
+        st.markdown("### 📊 История сна")
+        df = pd.read_sql_query('''SELECT date as 'Дата', bedtime as 'Лёг', wake_time as 'Встал',
+            hours as 'Часов', quality as 'Качество', notes as 'Заметки'
+            FROM sleep WHERE surname=? AND name=? AND birth_date=?
+            ORDER BY date DESC LIMIT 14''', conn,
+                               params=(surname, name, birth_date.strftime("%d.%m.%Y")))
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            chart = df[['Дата', 'Часов']].set_index('Дата')
+            st.line_chart(chart)
+
+# ============================================================================
+# 11. РАЗДЕЛ: 📊 ИСТОРИЯ
+# ============================================================================
+elif section == "📊 История":
+    st.markdown("<h1>📊 Полная история</h1>", unsafe_allow_html=True)
+
+    if not (surname and name):
+        st.warning("⬅️ Заполни профиль слева")
+    else:
+        tab1, tab2, tab3, tab4 = st.tabs(["⚖️ Замеры", "💪 Тренировки", "💧 Вода", "😴 Сон"])
+        bd = birth_date.strftime("%d.%m.%Y")
+
+        with tab1:
+            df = pd.read_sql_query('''SELECT date as 'Дата', weight as 'Вес', bmi as 'ИМТ',
+                category as 'Категория', calories_lose as 'Ккал' FROM measurements
+                WHERE surname=? AND name=? AND birth_date=? ORDER BY date DESC''', conn,
+                                   params=(surname, name, bd))
+            if not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                if len(df) >= 2:
+                    st.line_chart(df[['Дата', 'Вес']].set_index('Дата'))
+            else:
+                st.info("Нет записей")
+
+        with tab2:
+            df = pd.read_sql_query('''SELECT date as 'Дата', exercise as 'Упражнение',
+                sets as 'Подх', reps as 'Повт', weight_kg as 'Вес' FROM workouts
+                WHERE surname=? AND name=? AND birth_date=? ORDER BY date DESC LIMIT 30''', conn,
+                                   params=(surname, name, bd))
+            if not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Нет записей")
+
+        with tab3:
+            df = pd.read_sql_query('''SELECT SUBSTR(date, 1, 10) as 'День',
+                SUM(volume_ml) as 'Всего (мл)' FROM water
+                WHERE surname=? AND name=? AND birth_date=?
+                GROUP BY SUBSTR(date, 1, 10) ORDER BY date DESC LIMIT 14''', conn,
+                                   params=(surname, name, bd))
+            if not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.line_chart(df.set_index('День'))
+            else:
+                st.info("Нет записей")
+
+        with tab4:
+            df = pd.read_sql_query('''SELECT date as 'Дата', hours as 'Часов',
+                quality as 'Качество' FROM sleep
+                WHERE surname=? AND name=? AND birth_date=? ORDER BY date DESC LIMIT 14''', conn,
+                                   params=(surname, name, bd))
+            if not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.line_chart(df[['Дата', 'Часов']].set_index('Дата'))
+            else:
+                st.info("Нет записей")
