@@ -161,7 +161,7 @@ def set_background(bg_name: str):
 @st.cache_resource
 def init_db():
     """Инициализация БД с индексами"""
-    conn = sqlite3.connect('health_platform_v7.db', check_same_thread=False)
+    conn = sqlite3.connect('health_platform_v8.db', check_same_thread=False)
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS users (
