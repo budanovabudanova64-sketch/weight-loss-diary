@@ -60,7 +60,7 @@ def set_background(bg_name):
 # ============================================================================
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('health_platform_v5.db', check_same_thread=False)
+    conn = sqlite3.connect('health_platform_v9.db', check_same_thread=False)
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS users (
